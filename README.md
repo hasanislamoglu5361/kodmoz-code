@@ -60,6 +60,16 @@ cargo install --path .
 kodmoz-code /yol/proje
 ```
 
+macOS uygulaması olarak kurmak için (ikonlu `.app`):
+
+```bash
+./scripts/install-macos.sh
+```
+
+Script release derlemesini yapar, `Kodmoz Code.app` paketini ikonuyla oluşturur
+ve `/Applications` altına kurar (yazılamıyorsa `~/Applications`). Kurulumdan
+sonra Launchpad veya Spotlight'ten "Kodmoz Code" arayarak açabilirsiniz.
+
 Kullanım biçimleri:
 
 ```bash
