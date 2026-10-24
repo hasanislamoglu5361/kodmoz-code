@@ -13,6 +13,7 @@ pub enum CommandId {
     CloseTab,
     QuickOpen,
     Palette,
+    ToggleTerminal,
     ToggleSidebar,
     ToggleDiagnostics,
     ZoomIn,
@@ -28,6 +29,7 @@ pub const COMMANDS: &[(&str, &str, CommandId)] = &[
     ("Sekmeyi Kapat", "Cmd+W", CommandId::CloseTab),
     ("Dosyaya Git...", "Cmd+P", CommandId::QuickOpen),
     ("Komut Paleti", "Cmd+Shift+P", CommandId::Palette),
+    ("Terminali Aç/Kapat", "Cmd+`", CommandId::ToggleTerminal),
     ("Kenar Çubuğunu Aç/Kapat", "Cmd+B", CommandId::ToggleSidebar),
     (
         "Sorunlar Panelini Aç/Kapat",

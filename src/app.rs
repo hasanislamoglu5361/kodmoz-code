@@ -15,6 +15,7 @@ use crate::highlight::{Highlighter, LanguageId};
 use crate::lsp::{
     find_rust_analyzer, path_to_uri, uri_to_path, DiagnosticItem, LspClient, LspEvent,
 };
+use crate::terminal::TerminalSession;
 use crate::theme;
 
 pub(crate) struct Tab {
@@ -69,12 +70,18 @@ pub struct KodmozCode {
     pub(crate) lsp_init_id: Option<i64>,
     pub(crate) lsp_status: String,
     pub(crate) lsp_tried: bool,
+    pub(crate) lsp_started_at: Option<Instant>,
     pub(crate) diagnostics: HashMap<PathBuf, Vec<DiagnosticItem>>,
     pub(crate) quick_open: Option<QuickOpen>,
     pub(crate) palette: Option<Palette>,
     pub(crate) confirm_close: Option<usize>,
     pub(crate) status_msg: Option<(String, Instant)>,
     pub(crate) git_branch: Option<String>,
+    pub(crate) terminal: Option<TerminalSession>,
+    pub(crate) terminal_visible: bool,
+    pub(crate) terminal_error: Option<String>,
+    pub(crate) terminal_focus_requested: bool,
+    pub(crate) logo: Option<egui::TextureHandle>,
     pending_command: Option<CommandId>,
     last_title: String,
 }
@@ -106,12 +113,18 @@ impl KodmozCode {
             lsp_init_id: None,
             lsp_status: "LSP kapalı".to_string(),
             lsp_tried: false,
+            lsp_started_at: None,
             diagnostics: HashMap::new(),
             quick_open: None,
             palette: None,
             confirm_close: None,
             status_msg: highlight_error.map(|message| (message, Instant::now())),
             git_branch: None,
+            terminal: None,
+            terminal_visible: std::env::var_os("KODMOZ_TERMINAL").is_some(),
+            terminal_error: None,
+            terminal_focus_requested: true,
+            logo: load_logo_texture(&cc.egui_ctx),
             pending_command: None,
             last_title: String::new(),
         };
@@ -141,7 +154,8 @@ impl KodmozCode {
         self.lsp_ready = false;
         self.lsp_init_id = None;
         self.lsp_tried = false;
-        self.lsp_status = "LSP bekliyor".to_string();
+        self.lsp_started_at = None;
+        self.lsp_status = "LSP kapalı".to_string();
         self.diagnostics.clear();
         self.tabs.clear();
         self.active = None;
@@ -151,6 +165,7 @@ impl KodmozCode {
         self.root = Some(path.clone());
         self.explorer = Some(Explorer::new(path.clone()));
         self.git_branch = read_git_branch(&path);
+        self.ensure_lsp();
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
@@ -233,7 +248,7 @@ impl KodmozCode {
             content,
             dirty: false,
             saved_hash: hash,
-            language,
+            language: language.clone(),
             version: 1,
             lsp_opened: false,
             last_sent_hash: hash,
@@ -400,7 +415,7 @@ impl KodmozCode {
             let tab = &mut self.tabs[index];
             tab.path = Some(path.clone());
             tab.name = name;
-            tab.language = language;
+            tab.language = language.clone();
             tab.dirty = false;
             tab.saved_hash = hash;
             tab.last_sent_hash = 0;
@@ -429,7 +444,7 @@ impl KodmozCode {
         };
         if !root.join("Cargo.toml").is_file() {
             self.lsp_tried = true;
-            self.lsp_status = "Cargo projesi değil".to_string();
+            self.lsp_status = "Rust projesi değil".to_string();
             return;
         }
         self.lsp_tried = true;
@@ -466,6 +481,7 @@ impl KodmozCode {
                 let init_id = client.request("initialize", params);
                 self.lsp_init_id = Some(init_id);
                 self.lsp = Some(client);
+                self.lsp_started_at = Some(Instant::now());
                 self.lsp_status = "rust-analyzer başlatılıyor...".to_string();
             }
             Err(err) => {
@@ -601,6 +617,15 @@ impl KodmozCode {
             }
         }
         if self.lsp.is_some() {
+            if !self.lsp_ready
+                && self
+                    .lsp_started_at
+                    .map(|started| started.elapsed() > Duration::from_secs(20))
+                    .unwrap_or(false)
+                && !self.lsp_status.contains("yanıt vermedi")
+            {
+                self.lsp_status = "LSP yanıt vermedi".to_string();
+            }
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
@@ -760,6 +785,7 @@ impl KodmozCode {
             ToggleSidebar,
             QuickOpen,
             Palette,
+            ToggleTerminal,
             ToggleDiagnostics,
             ZoomIn,
             ZoomOut,
@@ -786,6 +812,11 @@ impl KodmozCode {
             }
             if input.consume_shortcut(&KeyboardShortcut::new(cmd_shift, Key::M)) {
                 action = Some(Action::ToggleDiagnostics);
+            }
+            if input.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Backtick))
+                || input.consume_shortcut(&KeyboardShortcut::new(cmd, Key::J))
+            {
+                action = Some(Action::ToggleTerminal);
             }
             if input.consume_shortcut(&KeyboardShortcut::new(cmd, Key::O)) {
                 action = Some(Action::OpenFolder);
@@ -830,6 +861,12 @@ impl KodmozCode {
             Some(Action::ToggleSidebar) => self.sidebar_visible = !self.sidebar_visible,
             Some(Action::QuickOpen) => self.open_quick_open(),
             Some(Action::Palette) => self.palette = Some(Palette::new()),
+            Some(Action::ToggleTerminal) => {
+                self.terminal_visible = !self.terminal_visible;
+                if self.terminal_visible {
+                    self.terminal_focus_requested = true;
+                }
+            }
             Some(Action::ToggleDiagnostics) => self.diagnostics_visible = !self.diagnostics_visible,
             Some(Action::ZoomIn) => {
                 let size = (self.font_size + 1.0).min(28.0);
@@ -885,6 +922,12 @@ impl KodmozCode {
             }
             CommandId::QuickOpen => self.open_quick_open(),
             CommandId::Palette => self.palette = Some(Palette::new()),
+            CommandId::ToggleTerminal => {
+                self.terminal_visible = !self.terminal_visible;
+                if self.terminal_visible {
+                    self.terminal_focus_requested = true;
+                }
+            }
             CommandId::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
             CommandId::ToggleDiagnostics => self.diagnostics_visible = !self.diagnostics_visible,
             CommandId::ZoomIn => {
@@ -912,9 +955,21 @@ impl KodmozCode {
             )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let (mark, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                    theme::paint_brand_mark(ui.painter(), mark);
-                    ui.add_space(3.0);
+                    let (mark, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                    if let Some(logo) = &self.logo {
+                        ui.painter().image(
+                            logo.id(),
+                            mark,
+                            egui::Rect::from_min_max(
+                                egui::pos2(0.06, 0.06),
+                                egui::pos2(0.94, 0.94),
+                            ),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        theme::paint_brand_mark(ui.painter(), mark);
+                    }
+                    ui.add_space(4.0);
                     ui.label(
                         RichText::new("Kodmoz")
                             .strong()
@@ -925,19 +980,29 @@ impl KodmozCode {
                     ui.add_space(4.0);
                     ui.separator();
 
-                    if ghost_button(ui, "Klasör Aç", "Cmd+O").clicked() {
+                    if theme::icon_button(ui, theme::Icon::Folder, "Klasör Aç", "Cmd+O").clicked()
+                    {
                         self.pending_command = Some(CommandId::OpenFolder);
                     }
-                    if ghost_button(ui, "Kaydet", "Cmd+S").clicked() {
+                    if theme::icon_button(ui, theme::Icon::Save, "Kaydet", "Cmd+S").clicked() {
                         self.pending_command = Some(CommandId::Save);
                     }
-                    if ghost_button(ui, "Dosyaya Git", "Cmd+P").clicked() {
+                    if theme::icon_button(ui, theme::Icon::Search, "Dosyaya Git", "Cmd+P").clicked()
+                    {
                         self.pending_command = Some(CommandId::QuickOpen);
                     }
-                    if ghost_button(ui, "Komutlar", "Cmd+Shift+P").clicked() {
+                    if theme::icon_button(ui, theme::Icon::Command, "Komutlar", "Cmd+Shift+P")
+                        .clicked()
+                    {
                         self.pending_command = Some(CommandId::Palette);
                     }
-                    if ghost_button(ui, "Sorunlar", "Cmd+Shift+M").clicked() {
+                    if theme::icon_button(ui, theme::Icon::Terminal, "Terminal", "Cmd+`").clicked()
+                    {
+                        self.pending_command = Some(CommandId::ToggleTerminal);
+                    }
+                    if theme::icon_button(ui, theme::Icon::Problems, "Sorunlar", "Cmd+Shift+M")
+                        .clicked()
+                    {
                         self.pending_command = Some(CommandId::ToggleDiagnostics);
                     }
 
@@ -955,25 +1020,26 @@ impl KodmozCode {
                                     ui.label(RichText::new(name).size(10.0).color(theme::MUTED));
                                 });
                             chip.response.on_hover_text(root.display().to_string());
+
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new(truncate(&self.lsp_status, 34))
+                                    .size(9.5)
+                                    .color(theme::FAINT),
+                            );
+                            let color = if self.lsp_ready {
+                                theme::GREEN
+                            } else if self.lsp.is_some() {
+                                theme::YELLOW
+                            } else if self.lsp_status.contains("bulunamadı")
+                                || self.lsp_status.contains("kapandı")
+                            {
+                                theme::RED
+                            } else {
+                                theme::FAINT
+                            };
+                            theme::status_dot(ui, color).on_hover_text(&self.lsp_status);
                         }
-                        ui.add_space(10.0);
-                        ui.label(
-                            RichText::new(&self.lsp_status)
-                                .size(9.5)
-                                .color(theme::FAINT),
-                        );
-                        let color = if self.lsp_ready {
-                            theme::GREEN
-                        } else if self.lsp.is_some() {
-                            theme::YELLOW
-                        } else if self.lsp_status.contains("bulunamadı")
-                            || self.lsp_status.contains("kapandı")
-                        {
-                            theme::RED
-                        } else {
-                            theme::FAINT
-                        };
-                        theme::status_dot(ui, color).on_hover_text(&self.lsp_status);
                     });
                 });
             });
@@ -993,17 +1059,21 @@ impl KodmozCode {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    theme::paint_icon(ui.painter(), icon_rect, theme::Icon::Folder, theme::FAINT);
                     ui.label(
                         RichText::new("EXPLORER")
                             .size(9.5)
                             .strong()
                             .color(theme::FAINT),
                     );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ghost_button(ui, "Yenile", "").clicked() {
-                            refresh = true;
-                        }
-                    });
+                    ui.add_space((ui.available_width() - 52.0).max(0.0));
+                    if theme::icon_only_button(ui, theme::Icon::FilePlus, "Yeni dosya").clicked() {
+                        self.pending_command = Some(CommandId::NewFile);
+                    }
+                    if theme::icon_only_button(ui, theme::Icon::Refresh, "Yenile").clicked() {
+                        refresh = true;
+                    }
                 });
                 ui.add_space(2.0);
                 ui.separator();
@@ -1024,7 +1094,7 @@ impl KodmozCode {
                             .color(theme::MUTED),
                     );
                     ui.add_space(4.0);
-                    if ghost_button(ui, "Klasör Aç", "").clicked() {
+                    if theme::icon_button(ui, theme::Icon::Folder, "Klasör Aç", "").clicked() {
                         self.pending_command = Some(CommandId::OpenFolder);
                     }
                 }
@@ -1066,6 +1136,8 @@ impl KodmozCode {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    theme::paint_icon(ui.painter(), icon_rect, theme::Icon::Problems, theme::FAINT);
                     ui.label(
                         RichText::new("SORUNLAR")
                             .size(9.5)
@@ -1104,7 +1176,7 @@ impl KodmozCode {
                                 .map(|relative| relative.display().to_string())
                                 .unwrap_or_else(|| path.display().to_string());
                             let text = format!("{}   ·   {}:{}", item.message, name, item.line + 1);
-                            if diagnostic_row(ui, &text, severity_color(item.severity)).clicked() {
+                            if diagnostic_row(ui, &text, item.severity).clicked() {
                                 jump = Some((path.clone(), item.line, item.col));
                             }
                         }
@@ -1194,6 +1266,14 @@ impl KodmozCode {
                     );
                     if let Some(branch) = &branch {
                         ui.add_space(8.0);
+                        let (icon_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                        theme::paint_icon(
+                            ui.painter(),
+                            icon_rect,
+                            theme::Icon::Branch,
+                            theme::FAINT,
+                        );
                         ui.label(
                             RichText::new(format!("git:{branch}"))
                                 .size(9.5)
@@ -1202,10 +1282,21 @@ impl KodmozCode {
                     }
                     if is_read_only {
                         ui.add_space(8.0);
+                        let (icon_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                        theme::paint_icon(ui.painter(), icon_rect, theme::Icon::Lock, theme::FAINT);
                         ui.label(RichText::new("salt okunur").size(9.0).color(theme::FAINT));
                     }
                     if errors > 0 {
                         ui.add_space(8.0);
+                        let (icon_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                        theme::paint_icon(
+                            ui.painter(),
+                            icon_rect,
+                            theme::Icon::Problems,
+                            theme::RED,
+                        );
                         if theme::chip(ui, &format!("{errors} hata"), theme::RED, theme::RED_BG)
                             .on_hover_text("Sorunlar panelini aç/kapat")
                             .clicked()
@@ -1282,22 +1373,32 @@ impl KodmozCode {
     }
 
     fn tabs_bar(&mut self, ui: &mut Ui) {
-        let infos: Vec<(usize, u64, String, bool, bool)> = self
+        let infos: Vec<(usize, u64, String, bool, bool, String)> = self
             .tabs
             .iter()
             .enumerate()
             .map(|(index, tab)| {
+                let extension = tab
+                    .path
+                    .as_ref()
+                    .and_then(|path| path.extension())
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or("")
+                    .to_string();
                 (
                     index,
                     tab.id,
                     tab.name.clone(),
                     tab.dirty,
                     Some(index) == self.active,
+                    extension,
                 )
             })
             .collect();
         let mut activate = None;
         let mut close = None;
+        let mut new_file = false;
+        let mut active_rect = None;
         let font = FontId::proportional(12.0);
 
         let bar = egui::Frame::NONE
@@ -1305,7 +1406,7 @@ impl KodmozCode {
             .inner_margin(Margin {
                 left: 6,
                 right: 6,
-                top: 5,
+                top: 6,
                 bottom: 0,
             })
             .show(ui, |ui| {
@@ -1313,30 +1414,34 @@ impl KodmozCode {
                     .id_salt("kodmoz_tabs")
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            for (index, tab_id, name, dirty, selected) in &infos {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            for (index, tab_id, name, dirty, selected, extension) in &infos {
                                 let text_width = ui.fonts(|fonts| {
                                     fonts
                                         .layout_no_wrap(name.clone(), font.clone(), theme::TEXT)
                                         .size()
                                         .x
                                 });
-                                let width = (text_width + 46.0).clamp(96.0, 260.0);
+                                let width = (text_width + 73.0).clamp(120.0, 290.0);
                                 let (rect, response) =
-                                    ui.allocate_exact_size(Vec2::new(width, 31.0), Sense::click());
+                                    ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::click());
                                 let hovered = response.hovered();
                                 let painter = ui.painter().with_clip_rect(rect);
+                                let top_radius = egui::CornerRadius {
+                                    nw: 7,
+                                    ne: 7,
+                                    sw: 0,
+                                    se: 0,
+                                };
 
                                 if *selected {
-                                    painter.rect_filled(
+                                    active_rect = Some(rect);
+                                    painter.rect_filled(rect, top_radius, theme::BG);
+                                    painter.rect_stroke(
                                         rect,
-                                        egui::CornerRadius {
-                                            nw: 7,
-                                            ne: 7,
-                                            sw: 0,
-                                            se: 0,
-                                        },
-                                        theme::BG,
+                                        top_radius,
+                                        Stroke::new(1.0, theme::BORDER),
+                                        egui::StrokeKind::Inside,
                                     );
                                     painter.rect_filled(
                                         egui::Rect::from_min_size(
@@ -1351,21 +1456,28 @@ impl KodmozCode {
                                         },
                                         theme::ACCENT,
                                     );
-                                } else if hovered {
-                                    painter.rect_filled(
+                                } else {
+                                    let fill = if hovered {
+                                        theme::SURFACE_HI
+                                    } else {
+                                        theme::SURFACE
+                                    };
+                                    painter.rect_filled(rect, top_radius, fill);
+                                    painter.rect_stroke(
                                         rect,
-                                        egui::CornerRadius {
-                                            nw: 6,
-                                            ne: 6,
-                                            sw: 0,
-                                            se: 0,
-                                        },
-                                        theme::SURFACE,
+                                        top_radius,
+                                        Stroke::new(1.0, theme::BORDER),
+                                        egui::StrokeKind::Inside,
                                     );
                                 }
 
+                                let badge = egui::Rect::from_min_size(
+                                    egui::pos2(rect.left() + 11.0, rect.center().y - 6.5),
+                                    Vec2::new(22.0, 13.0),
+                                );
+                                theme::paint_file_badge(&painter, badge, extension);
                                 painter.text(
-                                    egui::pos2(rect.left() + 13.0, rect.center().y),
+                                    egui::pos2(rect.left() + 39.0, rect.center().y),
                                     Align2::LEFT_CENTER,
                                     name,
                                     font.clone(),
@@ -1373,7 +1485,7 @@ impl KodmozCode {
                                 );
 
                                 let close_rect = egui::Rect::from_center_size(
-                                    egui::pos2(rect.right() - 15.0, rect.center().y),
+                                    egui::pos2(rect.right() - 16.0, rect.center().y),
                                     Vec2::splat(18.0),
                                 );
                                 let close_response = ui.interact(
@@ -1384,7 +1496,7 @@ impl KodmozCode {
                                 let show_close = *selected || hovered || close_response.hovered();
                                 if *dirty {
                                     let dot_x = if show_close {
-                                        close_rect.left() - 8.0
+                                        close_rect.left() - 7.0
                                     } else {
                                         close_rect.center().x
                                     };
@@ -1411,18 +1523,34 @@ impl KodmozCode {
                                     close = Some(*index);
                                 }
                             }
+                            if theme::icon_only_button(ui, theme::Icon::Plus, "Yeni dosya")
+                                .clicked()
+                            {
+                                new_file = true;
+                            }
                         });
                     });
             });
 
         let rect = bar.response.rect;
-        ui.painter().line_segment(
+        let painter = ui.painter();
+        painter.line_segment(
             [
                 egui::pos2(rect.left(), rect.bottom()),
                 egui::pos2(rect.right(), rect.bottom()),
             ],
             Stroke::new(1.0, theme::BORDER),
         );
+        if let Some(active) = active_rect {
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(active.left() + 1.0, rect.bottom() - 1.0),
+                    egui::pos2(active.right() - 1.0, rect.bottom() + 1.0),
+                ),
+                egui::CornerRadius::ZERO,
+                theme::BG,
+            );
+        }
 
         if let Some(index) = activate {
             self.active = Some(index);
@@ -1430,15 +1558,27 @@ impl KodmozCode {
         if let Some(index) = close {
             self.request_close_tab(index);
         }
+        if new_file {
+            self.new_untitled();
+        }
     }
 
     fn welcome(&mut self, ui: &mut Ui) {
         theme::paint_dot_grid(ui);
         ui.vertical_centered(|ui| {
-            ui.add_space((ui.available_height() * 0.14).max(36.0));
-            let (mark, _) = ui.allocate_exact_size(Vec2::splat(58.0), Sense::hover());
-            theme::paint_brand_mark(ui.painter(), mark);
-            ui.add_space(16.0);
+            ui.add_space((ui.available_height() * 0.12).max(30.0));
+            let (mark, _) = ui.allocate_exact_size(Vec2::splat(64.0), Sense::hover());
+            if let Some(logo) = &self.logo {
+                ui.painter().image(
+                    logo.id(),
+                    mark,
+                    egui::Rect::from_min_max(egui::pos2(0.06, 0.06), egui::pos2(0.94, 0.94)),
+                    Color32::WHITE,
+                );
+            } else {
+                theme::paint_brand_mark(ui.painter(), mark);
+            }
+            ui.add_space(14.0);
             ui.label(
                 RichText::new("Kodmoz Code")
                     .size(32.0)
@@ -1465,12 +1605,13 @@ impl KodmozCode {
             }
             ui.add_space(28.0);
 
-            let cards_width = 3.0 * 178.0 + 2.0 * 10.0;
+            let cards_width = 4.0 * 178.0 + 3.0 * 10.0;
             ui.horizontal(|ui| {
                 ui.add_space(((ui.available_width() - cards_width) * 0.5).max(0.0));
-                welcome_card(ui, "Klasör Aç", "Cmd+O");
-                welcome_card(ui, "Dosyaya Git", "Cmd+P");
-                welcome_card(ui, "Komut Paleti", "Cmd+Shift+P");
+                welcome_card(ui, theme::Icon::Folder, "Klasör Aç", "Cmd+O");
+                welcome_card(ui, theme::Icon::Search, "Dosyaya Git", "Cmd+P");
+                welcome_card(ui, theme::Icon::Command, "Komut Paleti", "Cmd+Shift+P");
+                welcome_card(ui, theme::Icon::Terminal, "Terminal", "Cmd+`");
             });
             ui.add_space(20.0);
             ui.label(
@@ -1546,6 +1687,21 @@ impl KodmozCode {
         }
     }
 
+    fn open_system_path(&mut self, path: PathBuf) {
+        let path = path.canonicalize().unwrap_or(path);
+        if path.is_dir() {
+            self.open_folder(path);
+            return;
+        }
+        if !path.is_file() {
+            return;
+        }
+        if self.root.is_none() {
+            self.open_folder(project_root_for(&path));
+        }
+        self.open_file(path);
+    }
+
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|input| {
             input
@@ -1595,12 +1751,18 @@ impl KodmozCode {
 impl eframe::App for KodmozCode {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_shortcuts(ctx);
+        for path in crate::macos_open::take() {
+            self.open_system_path(path);
+        }
         self.handle_dropped_files(ctx);
         self.poll_lsp(ctx);
         self.flush_lsp_changes(ctx);
 
         self.top_bar(ctx);
         self.status_bar(ctx);
+        if self.terminal_visible {
+            self.terminal_panel(ctx);
+        }
         if self.diagnostics_visible {
             self.diagnostics_panel(ctx);
         }
@@ -1617,7 +1779,17 @@ impl eframe::App for KodmozCode {
 
         self.update_title(ctx);
         self.expire_status(ctx);
+        ctx.request_repaint_after(Duration::from_millis(500));
     }
+}
+
+fn load_logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let bytes = include_bytes!("../assets/icon-1024.png");
+    let image = image::load_from_memory(bytes).ok()?.thumbnail(128, 128);
+    let rgba = image.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+    Some(ctx.load_texture("kodmoz-logo", color_image, egui::TextureOptions::LINEAR))
 }
 
 fn configure_style(ctx: &egui::Context) {
@@ -1680,19 +1852,7 @@ fn configure_style(ctx: &egui::Context) {
     });
 }
 
-fn ghost_button(ui: &mut Ui, label: &str, shortcut: &str) -> egui::Response {
-    let response = ui.add(
-        egui::Button::new(RichText::new(label).size(11.5).color(theme::TEXT))
-            .min_size(Vec2::new(0.0, 24.0)),
-    );
-    if shortcut.is_empty() {
-        response
-    } else {
-        response.on_hover_text(shortcut)
-    }
-}
-
-fn welcome_card(ui: &mut Ui, title: &str, shortcut: &str) {
+fn welcome_card(ui: &mut Ui, icon: theme::Icon, title: &str, shortcut: &str) {
     egui::Frame::NONE
         .fill(theme::SURFACE)
         .stroke(Stroke::new(1.0, theme::BORDER))
@@ -1700,13 +1860,18 @@ fn welcome_card(ui: &mut Ui, title: &str, shortcut: &str) {
         .inner_margin(Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_width(150.0);
-            ui.label(RichText::new(title).size(11.5).color(theme::TEXT));
+            ui.horizontal(|ui| {
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                theme::paint_icon(ui.painter(), icon_rect, icon, theme::ACCENT);
+                ui.label(RichText::new(title).size(11.5).color(theme::TEXT));
+            });
             ui.add_space(10.0);
             theme::key_chip(ui, shortcut);
         });
 }
 
-fn diagnostic_row(ui: &mut Ui, text: &str, color: Color32) -> egui::Response {
+fn diagnostic_row(ui: &mut Ui, text: &str, severity: u8) -> egui::Response {
+    let color = severity_color(severity);
     let font = FontId::proportional(11.0);
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 21.0), Sense::click());
@@ -1715,15 +1880,29 @@ fn diagnostic_row(ui: &mut Ui, text: &str, color: Color32) -> egui::Response {
             .rect_filled(rect, egui::CornerRadius::same(4), theme::SURFACE);
     }
     let painter = ui.painter().with_clip_rect(rect);
-    painter.circle_filled(egui::pos2(rect.left() + 8.0, rect.center().y), 2.5, color);
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 9.0, rect.center().y),
+        Vec2::splat(11.0),
+    );
+    theme::paint_severity_icon(&painter, icon_rect, severity);
     let galley = ui.fonts(|fonts| fonts.layout_no_wrap(text.to_owned(), font, color));
-    let text_pos = egui::pos2(rect.left() + 18.0, rect.center().y - galley.size().y * 0.5);
+    let text_pos = egui::pos2(rect.left() + 19.0, rect.center().y - galley.size().y * 0.5);
     painter.galley(text_pos, galley, color);
     response
 }
 
 fn status_separator(ui: &mut Ui) {
     ui.label(RichText::new("·").size(9.0).color(theme::FAINT));
+}
+
+fn project_root_for(file: &Path) -> PathBuf {
+    let start = file.parent().unwrap_or(file);
+    for ancestor in start.ancestors() {
+        if ancestor.join("Cargo.toml").is_file() || ancestor.join(".git").exists() {
+            return ancestor.to_path_buf();
+        }
+    }
+    start.to_path_buf()
 }
 
 fn read_git_branch(root: &Path) -> Option<String> {
@@ -1797,7 +1976,16 @@ pub(crate) fn char_index_for_lsp(text: &str, line: usize, utf16_col: usize) -> u
     char_index
 }
 
-fn severity_color(severity: u8) -> Color32 {
+pub(crate) fn severity_label(severity: u8) -> &'static str {
+    match severity {
+        1 => "Hata",
+        2 => "Uyarı",
+        3 => "Bilgi",
+        _ => "İpucu",
+    }
+}
+
+pub(crate) fn severity_color(severity: u8) -> Color32 {
     match severity {
         1 => theme::RED,
         2 => theme::YELLOW,

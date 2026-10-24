@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -6,7 +7,9 @@ use egui::{
     TextEdit, Vec2,
 };
 
-use crate::app::{hash_str, line_of_char, KodmozCode};
+use crate::app::{
+    char_index_for_lsp, hash_str, line_of_char, severity_color, severity_label, KodmozCode,
+};
 use crate::highlight::LanguageId;
 use crate::theme;
 
@@ -19,7 +22,7 @@ impl KodmozCode {
             return;
         }
 
-        match self.tabs[index].language {
+        match &self.tabs[index].language {
             LanguageId::Image => {
                 self.image_ui(ui, index);
                 return;
@@ -32,7 +35,7 @@ impl KodmozCode {
         }
 
         let tab_id = self.tabs[index].id;
-        let language = self.tabs[index].language;
+        let language = self.tabs[index].language.clone();
         let font = FontId::monospace(self.font_size);
         let row_height = ui.fonts(|fonts| fonts.row_height(&font));
         let mut content = std::mem::take(&mut self.tabs[index].content);
@@ -72,7 +75,7 @@ impl KodmozCode {
 
         let highlighter = &mut self.highlighter;
         let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
-            let job = highlighter.highlight(text, language, font.clone(), wrap_width);
+            let job = highlighter.highlight(text, &language, font.clone(), wrap_width);
             ui.fonts(|fonts| fonts.layout_job(job))
         };
 
@@ -127,6 +130,22 @@ impl KodmozCode {
             tab.edit_time = Some(Instant::now());
         }
 
+        let diagnostics: Vec<crate::lsp::DiagnosticItem> = self.tabs[index]
+            .path
+            .as_ref()
+            .and_then(|path| self.diagnostics.get(path))
+            .cloned()
+            .unwrap_or_default();
+        let mut diagnostics_by_line: HashMap<u32, u8> = HashMap::new();
+        for diagnostic in &diagnostics {
+            let severity = diagnostics_by_line
+                .entry(diagnostic.line)
+                .or_insert(diagnostic.severity);
+            if diagnostic.severity < *severity {
+                *severity = diagnostic.severity;
+            }
+        }
+
         if let (Some(output), Some(gutter_rect)) = (&editor_output, gutter_rect) {
             let text_output = &output.inner;
             let galley = &text_output.galley;
@@ -144,6 +163,7 @@ impl KodmozCode {
 
             let cursor_line = line_of_char(&self.tabs[index].content, self.tabs[index].cursor_char);
             let mut line_number = 1usize;
+            let mut first_row_of_line = true;
             for row in &galley.rows {
                 let y = origin.y + row.rect.min.y;
                 if y + row.rect.height() >= gutter_rect.top() && y <= gutter_rect.bottom() {
@@ -165,9 +185,110 @@ impl KodmozCode {
                         font.clone(),
                         if active { theme::ACCENT } else { theme::FAINT },
                     );
+
+                    if first_row_of_line {
+                        if let Some(severity) =
+                            diagnostics_by_line.get(&(line_number.saturating_sub(1) as u32))
+                        {
+                            painter.circle_filled(
+                                egui::pos2(gutter_rect.right() - 3.5, y + row.rect.height() * 0.5),
+                                2.6,
+                                severity_color(*severity),
+                            );
+                        }
+                    }
                 }
                 if row.ends_with_newline {
                     line_number += 1;
+                    first_row_of_line = true;
+                } else {
+                    first_row_of_line = false;
+                }
+            }
+
+            if !diagnostics.is_empty() {
+                let text_clip = text_output.text_clip_rect.intersect(ui.clip_rect());
+                let squiggle_painter = ui.painter().with_clip_rect(text_clip);
+
+                let mut row_ranges = Vec::with_capacity(galley.rows.len());
+                let mut row_start_char = 0usize;
+                for row in &galley.rows {
+                    let mut row_end_char = row_start_char + row.glyphs.len();
+                    if row.ends_with_newline {
+                        row_end_char += 1;
+                    }
+                    row_ranges.push((row_start_char, row_end_char));
+                    row_start_char = row_end_char;
+                }
+
+                let content = &self.tabs[index].content;
+                for (diagnostic_index, diagnostic) in diagnostics.iter().enumerate() {
+                    let start = char_index_for_lsp(
+                        content,
+                        diagnostic.line as usize,
+                        diagnostic.col as usize,
+                    );
+                    let mut end = char_index_for_lsp(
+                        content,
+                        diagnostic.end_line as usize,
+                        diagnostic.end_col as usize,
+                    );
+                    if end <= start {
+                        end = start + 1;
+                    }
+                    let color = severity_color(diagnostic.severity);
+
+                    for (row_index, (row_start, row_end)) in row_ranges.iter().enumerate() {
+                        if *row_end <= start || *row_start >= end {
+                            continue;
+                        }
+                        let row = &galley.rows[row_index];
+                        let local_start_char = start.max(*row_start);
+                        let mut local_end_char = end.min(*row_end);
+                        if local_end_char <= local_start_char {
+                            local_end_char = (local_start_char + 1).min(*row_end);
+                        }
+                        let local_start = local_start_char - *row_start;
+                        let local_end = local_end_char - *row_start;
+                        let start_x = row
+                            .glyphs
+                            .get(local_start)
+                            .map(|glyph| glyph.pos.x)
+                            .unwrap_or(row.rect.max.x);
+                        let end_x = row
+                            .glyphs
+                            .get(local_end)
+                            .map(|glyph| glyph.pos.x)
+                            .unwrap_or(row.rect.max.x);
+                        let x0 = origin.x + start_x;
+                        let x1 = origin.x + end_x;
+                        let x1 = if x1 <= x0 + 2.0 { x0 + 4.0 } else { x1 };
+                        let y = origin.y + row.rect.max.y - 2.0;
+                        if y < text_clip.top() || y > text_clip.bottom() {
+                            continue;
+                        }
+                        squiggle_painter.add(egui::Shape::line(
+                            squiggle_points(egui::pos2(x0, y), x1),
+                            Stroke::new(1.0, color),
+                        ));
+                        let hover_rect =
+                            Rect::from_min_max(egui::pos2(x0, y - 5.0), egui::pos2(x1, y + 3.0));
+                        ui.interact(
+                            hover_rect,
+                            egui::Id::new((
+                                "kodmoz_diagnostic",
+                                index,
+                                diagnostic_index,
+                                row_index,
+                            )),
+                            Sense::hover(),
+                        )
+                        .on_hover_text(format!(
+                            "{}: {}",
+                            severity_label(diagnostic.severity),
+                            diagnostic.message
+                        ));
+                    }
                 }
             }
         }
@@ -222,6 +343,14 @@ impl KodmozCode {
                     ui.label(RichText::new(&name).size(11.5).strong().color(theme::TEXT));
                     if let Some((width, height)) = pixels {
                         ui.add_space(6.0);
+                        let (icon_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                        theme::paint_icon(
+                            ui.painter(),
+                            icon_rect,
+                            theme::Icon::Image,
+                            theme::FAINT,
+                        );
                         ui.label(
                             RichText::new(format!("{width} × {height}"))
                                 .size(10.0)
@@ -237,6 +366,8 @@ impl KodmozCode {
                         );
                     }
                     ui.add_space(6.0);
+                    let (lock_rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                    theme::paint_icon(ui.painter(), lock_rect, theme::Icon::Lock, theme::MUTED);
                     theme::chip(ui, "salt okunur", theme::MUTED, theme::SURFACE_HI);
 
                     ui.add_space((ui.available_width() - 62.0).max(0.0));
@@ -431,4 +562,16 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+fn squiggle_points(start: egui::Pos2, end_x: f32) -> Vec<egui::Pos2> {
+    let mut points = vec![start];
+    let mut x = start.x;
+    let mut up = true;
+    while x < end_x {
+        x = (x + 3.0).min(end_x);
+        points.push(egui::pos2(x, start.y + if up { -1.2 } else { 1.2 }));
+        up = !up;
+    }
+    points
 }

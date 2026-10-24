@@ -43,12 +43,16 @@ pub struct LspClient {
 
 impl LspClient {
     pub fn spawn(root: &Path, binary: &Path) -> std::io::Result<Self> {
-        let mut child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            .stderr(Stdio::inherit());
+        if let Some(path) = augmented_path() {
+            command.env("PATH", path);
+        }
+        let mut child = command.spawn()?;
 
         let stdin = child
             .stdin
@@ -177,6 +181,38 @@ fn read_message(reader: &mut impl BufRead) -> std::io::Result<Option<Value>> {
     let value = serde_json::from_slice(&body)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
     Ok(Some(value))
+}
+
+/// PATH handed to child processes. Finder-launched apps get a minimal PATH,
+/// which is not enough for rust-analyzer to find cargo/rustc.
+pub fn augmented_path() -> Option<std::ffi::OsString> {
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for relative in [".cargo/bin", ".local/bin"] {
+            let dir = home.join(relative);
+            if dir.is_dir() && !paths.contains(&dir) {
+                paths.push(dir);
+            }
+        }
+    }
+    for dir in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        let dir = PathBuf::from(dir);
+        if dir.is_dir() && !paths.contains(&dir) {
+            paths.push(dir);
+        }
+    }
+    std::env::join_paths(paths).ok()
 }
 
 pub fn path_to_uri(path: &Path) -> Option<String> {

@@ -90,6 +90,42 @@ cat > "$APP_TMP/Contents/Info.plist" <<PLIST
   <string>NSApplication</string>
   <key>NSSupportsAutomaticGraphicsSwitching</key>
   <true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Text Document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.text</string>
+        <string>public.plain-text</string>
+        <string>public.source-code</string>
+        <string>public.script</string>
+        <string>public.json</string>
+        <string>public.xml</string>
+        <string>public.yaml</string>
+        <string>public.html</string>
+        <string>public.css</string>
+        <string>com.netscape.javascript-source</string>
+        <string>public.php-script</string>
+        <string>public.ruby-script</string>
+        <string>public.perl-script</string>
+        <string>public.objective-c-source</string>
+        <string>com.sun.java-source</string>
+        <string>com.kodmoz.terraform</string>
+        <string>public.python-script</string>
+        <string>public.shell-script</string>
+        <string>public.c-source</string>
+        <string>public.c-plus-plus-source</string>
+        <string>public.swift-source</string>
+        <string>public.rust-source</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

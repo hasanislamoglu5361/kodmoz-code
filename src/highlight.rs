@@ -4,50 +4,152 @@ use std::path::Path;
 use egui::text::{LayoutJob, LayoutSection, TextFormat};
 use egui::{Color32, FontId};
 use streaming_iterator::StreamingIterator;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{FontStyle, Theme, ThemeSet};
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LanguageId {
     Rust,
     Plain,
     Image,
     Binary,
+    Syntax { name: String, token: String },
 }
 
 impl LanguageId {
     pub fn from_path(path: &Path) -> Self {
-        match path
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let extension = path
             .extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("rs") => Self::Rust,
-            Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff") => {
-                Self::Image
-            }
-            _ => Self::Plain,
+            .unwrap_or_default();
+
+        if matches!(
+            extension.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff"
+        ) {
+            return Self::Image;
         }
+
+        if file_name == "dockerfile"
+            || file_name.starts_with("dockerfile.")
+            || extension == "dockerfile"
+        {
+            return syntax("Dockerfile", "dockerfile");
+        }
+        if matches!(file_name.as_str(), "makefile" | "gnumakefile")
+            || matches!(extension.as_str(), "mk" | "mak" | "am")
+        {
+            return syntax("Makefile", "make");
+        }
+        if file_name == "cargo.lock" {
+            return syntax("TOML", "toml");
+        }
+        if file_name == "cmakelists.txt" {
+            return syntax("CMake", "cmake");
+        }
+        if file_name == "jenkinsfile" {
+            return syntax("Groovy", "groovy");
+        }
+        if file_name == ".env" || file_name.starts_with(".env.") {
+            return syntax("ENV", "ini");
+        }
+
+        let (name, token) = match extension.as_str() {
+            "rs" => return Self::Rust,
+            "sh" | "bash" | "zsh" | "fish" => ("Shell", "sh"),
+            "php" | "phtml" => ("PHP", "php"),
+            "swift" => ("Swift", "swift"),
+            "yaml" | "yml" => ("YAML", "yaml"),
+            "tf" | "tfvars" | "hcl" => ("Terraform", "tf"),
+            "toml" => ("TOML", "toml"),
+            "json" | "jsonc" | "json5" => ("JSON", "json"),
+            "md" | "markdown" => ("Markdown", "md"),
+            "js" | "mjs" | "cjs" => ("JavaScript", "js"),
+            "jsx" => ("JavaScript React", "jsx"),
+            "ts" | "mts" | "cts" => ("TypeScript", "ts"),
+            "tsx" => ("TypeScript React", "tsx"),
+            "py" | "pyw" => ("Python", "py"),
+            "go" => ("Go", "go"),
+            "c" | "h" => ("C", "c"),
+            "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => ("C++", "cpp"),
+            "cs" => ("C#", "cs"),
+            "java" => ("Java", "java"),
+            "kt" | "kts" => ("Kotlin", "kt"),
+            "rb" | "rake" => ("Ruby", "rb"),
+            "lua" => ("Lua", "lua"),
+            "sql" => ("SQL", "sql"),
+            "html" | "htm" => ("HTML", "html"),
+            "css" => ("CSS", "css"),
+            "scss" => ("SCSS", "scss"),
+            "sass" => ("Sass", "sass"),
+            "less" => ("Less", "less"),
+            "xml" | "svg" => ("XML", "xml"),
+            "ini" | "cfg" | "conf" => ("INI", "ini"),
+            "vue" => ("Vue", "vue"),
+            "pl" | "pm" => ("Perl", "pl"),
+            "r" => ("R", "r"),
+            "dart" => ("Dart", "dart"),
+            "ex" | "exs" => ("Elixir", "ex"),
+            "erl" | "hrl" => ("Erlang", "erl"),
+            "hs" => ("Haskell", "hs"),
+            "clj" | "cljs" | "cljc" => ("Clojure", "clj"),
+            "scala" => ("Scala", "scala"),
+            "groovy" | "gradle" => ("Groovy", "groovy"),
+            "cmake" => ("CMake", "cmake"),
+            "txt" | "text" | "log" | "lock" | "" => return Self::Plain,
+            other => {
+                let label = other.to_ascii_uppercase();
+                return Self::Syntax {
+                    name: label,
+                    token: other.to_string(),
+                };
+            }
+        };
+
+        syntax(name, token)
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &str {
         match self {
             Self::Rust => "Rust",
             Self::Plain => "Plain Text",
             Self::Image => "Görsel",
             Self::Binary => "İkili",
+            Self::Syntax { name, .. } => name,
         }
     }
 
-    pub fn lsp_id(self) -> Option<&'static str> {
+    pub fn lsp_id(&self) -> Option<&'static str> {
         match self {
             Self::Rust => Some("rust"),
             _ => None,
         }
     }
 
-    pub fn is_read_only(self) -> bool {
+    pub fn is_read_only(&self) -> bool {
         matches!(self, Self::Image | Self::Binary)
+    }
+
+    pub fn syntax_token(&self) -> Option<&str> {
+        match self {
+            Self::Syntax { token, .. } => Some(token),
+            _ => None,
+        }
+    }
+}
+
+fn syntax(name: &str, token: &str) -> LanguageId {
+    LanguageId::Syntax {
+        name: name.to_string(),
+        token: token.to_string(),
     }
 }
 
@@ -201,6 +303,8 @@ pub struct Highlighter {
     parser: Parser,
     rust_query: Option<Query>,
     query_error: Option<String>,
+    syntax_set: SyntaxSet,
+    theme: Theme,
 }
 
 impl Highlighter {
@@ -217,10 +321,21 @@ impl Highlighter {
                 (None, Some(err.to_string()))
             }
         };
+
+        let syntax_set = two_face::syntax::extra_newlines();
+        let mut theme_set = ThemeSet::load_defaults();
+        let theme = theme_set
+            .themes
+            .remove("base16-eighties.dark")
+            .or_else(|| theme_set.themes.into_iter().next().map(|(_, theme)| theme))
+            .unwrap_or_else(|| Theme::default());
+
         Self {
             parser,
             rust_query,
             query_error,
+            syntax_set,
+            theme,
         }
     }
 
@@ -232,56 +347,72 @@ impl Highlighter {
     pub fn highlight(
         &mut self,
         text: &str,
-        language: LanguageId,
+        language: &LanguageId,
         font: FontId,
         wrap_width: f32,
     ) -> LayoutJob {
+        if text.is_empty() {
+            let mut job = LayoutJob {
+                text: String::new(),
+                ..Default::default()
+            };
+            job.wrap.max_width = wrap_width;
+            return job;
+        }
+
+        if *language == LanguageId::Rust {
+            if let Some(job) = self.highlight_rust(text, &font, wrap_width) {
+                return job;
+            }
+        } else if let Some(token) = language.syntax_token() {
+            if let Some(job) = self.highlight_syntect(text, token, &font, wrap_width) {
+                return job;
+            }
+        }
+
+        plain_job(text, &font, wrap_width)
+    }
+
+    fn highlight_rust(&mut self, text: &str, font: &FontId, wrap_width: f32) -> Option<LayoutJob> {
+        let query = self.rust_query.as_ref()?;
+        let tree = self.parser.parse(text, None)?;
+
+        let mut styles = vec![TokenStyle::Default; text.len()];
+        let mut cursor = QueryCursor::new();
+        let mut spans: Vec<(u8, Range<usize>, TokenStyle)> = Vec::new();
+        let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+        while let Some(m) = matches.next() {
+            for capture in m.captures {
+                let name = query
+                    .capture_names()
+                    .get(capture.index as usize)
+                    .copied()
+                    .unwrap_or("");
+                let Some(style) = style_for_capture(name) else {
+                    continue;
+                };
+                let range = capture.node.byte_range();
+                if range.start < range.end && range.end <= text.len() {
+                    spans.push((style.priority(), range, style));
+                }
+            }
+        }
+        spans.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| (b.1.end - b.1.start).cmp(&(a.1.end - a.1.start)))
+        });
+        for (_, range, style) in spans {
+            for slot in &mut styles[range] {
+                *slot = style;
+            }
+        }
+
         let mut job = LayoutJob {
             text: text.to_owned(),
             ..Default::default()
         };
         job.wrap.max_width = wrap_width;
         job.break_on_newline = true;
-
-        if text.is_empty() {
-            return job;
-        }
-
-        let mut styles = vec![TokenStyle::Default; text.len()];
-        if language == LanguageId::Rust {
-            if let Some(query) = &self.rust_query {
-                if let Some(tree) = self.parser.parse(text, None) {
-                    let mut cursor = QueryCursor::new();
-                    let mut spans: Vec<(u8, Range<usize>, TokenStyle)> = Vec::new();
-                    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
-                    while let Some(m) = matches.next() {
-                        for capture in m.captures {
-                            let name = query
-                                .capture_names()
-                                .get(capture.index as usize)
-                                .copied()
-                                .unwrap_or("");
-                            let Some(style) = style_for_capture(name) else {
-                                continue;
-                            };
-                            let range = capture.node.byte_range();
-                            if range.start < range.end && range.end <= text.len() {
-                                spans.push((style.priority(), range, style));
-                            }
-                        }
-                    }
-                    spans.sort_by(|a, b| {
-                        a.0.cmp(&b.0)
-                            .then_with(|| (b.1.end - b.1.start).cmp(&(a.1.end - a.1.start)))
-                    });
-                    for (_, range, style) in spans {
-                        for slot in &mut styles[range] {
-                            *slot = style;
-                        }
-                    }
-                }
-            }
-        }
 
         let mut start = 0;
         while start < text.len() {
@@ -301,7 +432,65 @@ impl Highlighter {
             });
             start = end;
         }
-        job
+        Some(job)
+    }
+
+    fn highlight_syntect(
+        &self,
+        text: &str,
+        token: &str,
+        font: &FontId,
+        wrap_width: f32,
+    ) -> Option<LayoutJob> {
+        let syntax = self
+            .syntax_set
+            .find_syntax_by_extension(token)
+            .or_else(|| self.syntax_set.find_syntax_by_token(token))
+            .or_else(|| self.syntax_set.find_syntax_by_name(token))?;
+
+        let mut highlighter = HighlightLines::new(syntax, &self.theme);
+        let mut job = LayoutJob {
+            text: text.to_owned(),
+            ..Default::default()
+        };
+        job.wrap.max_width = wrap_width;
+        job.break_on_newline = true;
+
+        let mut offset = 0usize;
+        for line in LinesWithEndings::from(text) {
+            let ranges = highlighter.highlight_line(line, &self.syntax_set).ok()?;
+            for (style, piece) in ranges {
+                if piece.is_empty() {
+                    continue;
+                }
+                let start = offset;
+                let end = offset + piece.len();
+                offset = end;
+                let color =
+                    Color32::from_rgb(style.foreground.r, style.foreground.g, style.foreground.b);
+                let mut format = TextFormat {
+                    font_id: font.clone(),
+                    color,
+                    ..Default::default()
+                };
+                if style.font_style.contains(FontStyle::ITALIC) {
+                    format.italics = true;
+                }
+                if style.font_style.contains(FontStyle::UNDERLINE) {
+                    format.underline = egui::Stroke::new(1.0, color);
+                }
+                job.sections.push(LayoutSection {
+                    leading_space: 0.0,
+                    byte_range: start..end,
+                    format,
+                });
+            }
+        }
+
+        if offset != text.len() {
+            return None;
+        }
+        Some(job)
     }
 }
 
@@ -309,6 +498,27 @@ impl Default for Highlighter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn plain_job(text: &str, font: &FontId, wrap_width: f32) -> LayoutJob {
+    let mut job = LayoutJob {
+        text: text.to_owned(),
+        ..Default::default()
+    };
+    job.wrap.max_width = wrap_width;
+    job.break_on_newline = true;
+    if !text.is_empty() {
+        job.sections.push(LayoutSection {
+            leading_space: 0.0,
+            byte_range: 0..text.len(),
+            format: TextFormat {
+                font_id: font.clone(),
+                color: TokenStyle::Default.color(),
+                ..Default::default()
+            },
+        });
+    }
+    job
 }
 
 #[cfg(test)]
@@ -331,13 +541,12 @@ mod tests {
         let source = "fn main() {\n    let x = \"hello\";\n    // done\n}\n";
         let job = highlighter.highlight(
             source,
-            LanguageId::Rust,
+            &LanguageId::Rust,
             FontId::monospace(14.0),
             f32::INFINITY,
         );
         assert_eq!(job.text, source);
         assert!(job.sections.len() > 3);
-        // Every byte of the input must be covered by exactly one section.
         let covered: usize = job.sections.iter().map(|s| s.byte_range.len()).sum();
         assert_eq!(covered, source.len());
         let keyword = job
@@ -359,7 +568,7 @@ mod tests {
         let mut highlighter = Highlighter::new();
         let job = highlighter.highlight(
             "hello world\nsecond line",
-            LanguageId::Plain,
+            &LanguageId::Plain,
             FontId::monospace(14.0),
             600.0,
         );
@@ -369,19 +578,48 @@ mod tests {
     #[test]
     fn detects_language_and_read_only_kinds() {
         assert_eq!(
-            LanguageId::from_path(std::path::Path::new("src/main.rs")),
+            LanguageId::from_path(Path::new("src/main.rs")),
             LanguageId::Rust
         );
         assert_eq!(
-            LanguageId::from_path(std::path::Path::new("photo.PNG")),
+            LanguageId::from_path(Path::new("photo.PNG")),
             LanguageId::Image
         );
         assert_eq!(
-            LanguageId::from_path(std::path::Path::new("notes.txt")),
+            LanguageId::from_path(Path::new("notes.txt")),
             LanguageId::Plain
+        );
+        assert_eq!(
+            LanguageId::from_path(Path::new("deploy.sh")),
+            syntax("Shell", "sh")
+        );
+        assert_eq!(
+            LanguageId::from_path(Path::new("Dockerfile")),
+            syntax("Dockerfile", "dockerfile")
+        );
+        assert_eq!(
+            LanguageId::from_path(Path::new("infra/main.tf")),
+            syntax("Terraform", "tf")
         );
         assert!(LanguageId::Image.is_read_only());
         assert!(LanguageId::Binary.is_read_only());
         assert!(!LanguageId::Rust.is_read_only());
+    }
+
+    #[test]
+    fn highlights_other_languages_with_syntect() {
+        let mut highlighter = Highlighter::new();
+        let source =
+            "services:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\"\n";
+        let job = highlighter.highlight(
+            source,
+            &syntax("YAML", "yaml"),
+            FontId::monospace(14.0),
+            f32::INFINITY,
+        );
+        assert_eq!(job.text, source);
+        assert!(job.sections.len() > 3);
+        let covered: usize = job.sections.iter().map(|s| s.byte_range.len()).sum();
+        assert_eq!(covered, source.len());
     }
 }

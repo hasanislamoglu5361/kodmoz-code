@@ -4,11 +4,60 @@ mod editor;
 mod explorer;
 mod highlight;
 mod lsp;
+mod terminal;
 mod theme;
 
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+mod macos_open {
+    use std::ffi::{c_char, CStr};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static OPEN_FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    extern "C" fn on_open_file(path: *const c_char) {
+        if path.is_null() {
+            return;
+        }
+        let path = unsafe { CStr::from_ptr(path) }
+            .to_string_lossy()
+            .into_owned();
+        if let Ok(mut files) = OPEN_FILES.lock() {
+            files.push(PathBuf::from(path));
+        }
+    }
+
+    extern "C" {
+        fn kodmoz_install_open_handler(callback: extern "C" fn(*const c_char));
+    }
+
+    pub fn install() {
+        unsafe { kodmoz_install_open_handler(on_open_file) };
+    }
+
+    pub fn take() -> Vec<PathBuf> {
+        OPEN_FILES
+            .lock()
+            .map(|mut files| std::mem::take(&mut *files))
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod macos_open {
+    use std::path::PathBuf;
+
+    pub fn install() {}
+    pub fn take() -> Vec<PathBuf> {
+        Vec::new()
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    macos_open::install();
+
     let (root, file) = resolve_args();
 
     #[cfg(debug_assertions)]
