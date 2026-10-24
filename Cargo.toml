@@ -1,0 +1,19 @@
+[package]
+name = "kodmoz-code"
+version = "0.1.0"
+edition = "2021"
+description = "Kodmoz Code — a minimal VS Code-like IDE written in Rust"
+license = "MIT"
+repository = "https://github.com/hasanislamoglu5361/kodmoz-code"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+ignore = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
+rfd = "0.15"
+serde_json = "1"
+streaming-iterator = "0.1"
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+url = "2"
