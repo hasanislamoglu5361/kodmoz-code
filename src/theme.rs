@@ -219,6 +219,14 @@ pub enum Icon {
     Image,
     Plus,
     Trash,
+    Edit,
+    Split,
+    Eye,
+    LayoutSingle,
+    LayoutColumns,
+    LayoutRows,
+    LayoutThree,
+    LayoutFour,
 }
 
 pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -477,6 +485,117 @@ pub fn paint_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 stroke,
             );
         }
+        Icon::Edit => {
+            let start = center + Vec2::new(-size * 0.25, size * 0.25);
+            let end = center + Vec2::new(size * 0.22, -size * 0.22);
+            painter.line_segment([start, end], stroke);
+            painter.line_segment([start, start + Vec2::new(size * 0.11, size * 0.02)], stroke);
+            painter.line_segment([end, end + Vec2::new(-size * 0.02, size * 0.11)], stroke);
+            painter.line_segment(
+                [end, center + Vec2::new(size * 0.34, -size * 0.34)],
+                Stroke::new(stroke.width, color),
+            );
+        }
+        Icon::Split => {
+            let frame = Rect::from_center_size(center, Vec2::new(size * 0.7, size * 0.6));
+            painter.rect_stroke(
+                frame,
+                CornerRadius::same(2),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(frame.center().x, frame.top()),
+                    egui::pos2(frame.center().x, frame.bottom()),
+                ],
+                stroke,
+            );
+        }
+        Icon::Eye => {
+            painter.circle_stroke(center, size * 0.27, stroke);
+            painter.circle_filled(center, size * 0.085, color);
+        }
+        Icon::LayoutSingle => {
+            let frame = Rect::from_center_size(center, Vec2::new(size * 0.7, size * 0.6));
+            painter.rect_stroke(
+                frame,
+                CornerRadius::same(2),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        Icon::LayoutColumns => {
+            let frame = Rect::from_center_size(center, Vec2::new(size * 0.7, size * 0.6));
+            painter.rect_stroke(
+                frame,
+                CornerRadius::same(2),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(frame.center().x, frame.top()),
+                    egui::pos2(frame.center().x, frame.bottom()),
+                ],
+                stroke,
+            );
+        }
+        Icon::LayoutRows => {
+            let frame = Rect::from_center_size(center, Vec2::new(size * 0.7, size * 0.6));
+            painter.rect_stroke(
+                frame,
+                CornerRadius::same(2),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(frame.left(), frame.center().y),
+                    egui::pos2(frame.right(), frame.center().y),
+                ],
+                stroke,
+            );
+        }
+        Icon::LayoutThree => {
+            let frame = Rect::from_center_size(center, Vec2::new(size * 0.7, size * 0.6));
+            painter.rect_stroke(
+                frame,
+                CornerRadius::same(2),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            for factor in [1.0 / 3.0, 2.0 / 3.0] {
+                let x = frame.left() + frame.width() * factor;
+                painter.line_segment(
+                    [egui::pos2(x, frame.top()), egui::pos2(x, frame.bottom())],
+                    stroke,
+                );
+            }
+        }
+        Icon::LayoutFour => {
+            let frame = Rect::from_center_size(center, Vec2::new(size * 0.7, size * 0.6));
+            painter.rect_stroke(
+                frame,
+                CornerRadius::same(2),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(frame.center().x, frame.top()),
+                    egui::pos2(frame.center().x, frame.bottom()),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(frame.left(), frame.center().y),
+                    egui::pos2(frame.right(), frame.center().y),
+                ],
+                stroke,
+            );
+        }
         Icon::Trash => {
             let body = Rect::from_center_size(
                 center + Vec2::new(0.0, size * 0.09),
@@ -552,6 +671,34 @@ pub fn icon_only_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
         rect.shrink(4.0),
         icon,
         if response.hovered() { TEXT } else { MUTED },
+    );
+    if tooltip.is_empty() {
+        response
+    } else {
+        response.on_hover_text(tooltip)
+    }
+}
+
+pub fn icon_toggle_button(ui: &mut Ui, icon: Icon, selected: bool, tooltip: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+    if selected {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(5), ACCENT_SOFT);
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(5), SURFACE_HI);
+    }
+    paint_icon(
+        ui.painter(),
+        rect.shrink(4.0),
+        icon,
+        if selected {
+            ACCENT
+        } else if response.hovered() {
+            TEXT
+        } else {
+            MUTED
+        },
     );
     if tooltip.is_empty() {
         response

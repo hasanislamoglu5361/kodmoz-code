@@ -58,14 +58,14 @@ mod macos_open {
 fn main() -> eframe::Result<()> {
     macos_open::install();
 
-    let (root, file) = resolve_args();
+    let (root, files) = resolve_args();
 
     #[cfg(debug_assertions)]
     eprintln!(
-        "Kodmoz Code başlatılıyor: cwd={:?} kök={:?} dosya={:?}",
+        "Kodmoz Code başlatılıyor: cwd={:?} kök={:?} dosyalar={:?}",
         std::env::current_dir(),
         root,
-        file
+        files
     );
 
     let options = eframe::NativeOptions {
@@ -83,26 +83,41 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app::KodmozCode::new(
                 cc,
                 root.clone(),
-                file.clone(),
+                files.clone(),
             )))
         }),
     )
 }
 
-/// Accepts `kodmoz-code [folder] [file]` or `kodmoz-code path/to/file.rs`.
-/// A file argument resolves its workspace by walking up to Cargo.toml / .git.
-fn resolve_args() -> (Option<PathBuf>, Option<PathBuf>) {
-    let mut args = std::env::args().skip(1);
-    let first = args.next().map(|arg| canonicalize(PathBuf::from(arg)));
-    let second = args.next().map(|arg| canonicalize(PathBuf::from(arg)));
+/// Accepts `kodmoz-code [folder] [file...]` or `kodmoz-code file...`.
+/// File arguments resolve the workspace by walking up to Cargo.toml / .git.
+fn resolve_args() -> (Option<PathBuf>, Vec<PathBuf>) {
+    let args: Vec<PathBuf> = std::env::args()
+        .skip(1)
+        .map(PathBuf::from)
+        .map(canonicalize)
+        .collect();
+    let Some(first) = args.first() else {
+        return (None, Vec::new());
+    };
 
-    match (first, second) {
-        (None, _) => (None, None),
-        (Some(first), Some(second)) if first.is_dir() => (Some(first), Some(second)),
-        (Some(first), Some(second)) if first.is_file() => (Some(detect_root(&first)), Some(second)),
-        (Some(path), None) if path.is_file() => (Some(detect_root(&path)), Some(path)),
-        (Some(path), _) if path.is_dir() => (Some(path), None),
-        (Some(path), _) => (path.parent().map(Path::to_path_buf), Some(path)),
+    if first.is_dir() {
+        let root = first.clone();
+        let files = args
+            .iter()
+            .skip(1)
+            .map(|path| {
+                let path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    root.join(path)
+                };
+                canonicalize(path)
+            })
+            .collect();
+        (Some(root), files)
+    } else {
+        (Some(detect_root(first)), args)
     }
 }
 

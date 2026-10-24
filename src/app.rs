@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,6 +18,55 @@ use crate::lsp::{
 use crate::terminal::TerminalSession;
 use crate::theme;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum TabViewMode {
+    #[default]
+    Edit,
+    Split,
+    Preview,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PaneLayout {
+    Single,
+    TwoColumns,
+    TwoRows,
+    Three,
+    Four,
+}
+
+impl PaneLayout {
+    fn slots(self) -> usize {
+        match self {
+            Self::Single => 1,
+            Self::TwoColumns | Self::TwoRows => 2,
+            Self::Three => 3,
+            Self::Four => 4,
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::Single => "Tek bölme",
+            Self::TwoColumns => "İki sütun",
+            Self::TwoRows => "İki satır",
+            Self::Three => "Üç bölme",
+            Self::Four => "Dört bölme (2x2)",
+        }
+    }
+
+    fn from_env(value: &str) -> Option<Self> {
+        match value {
+            "1" | "single" => Some(Self::Single),
+            "2" | "2c" | "cols" => Some(Self::TwoColumns),
+            "2r" | "rows" => Some(Self::TwoRows),
+            "3" | "three" => Some(Self::Three),
+            "4" | "four" | "grid" => Some(Self::Four),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) struct Tab {
     pub id: u64,
     pub path: Option<PathBuf>,
@@ -26,6 +75,7 @@ pub(crate) struct Tab {
     pub dirty: bool,
     pub saved_hash: u64,
     pub language: LanguageId,
+    pub view_mode: TabViewMode,
     pub version: i64,
     pub lsp_opened: bool,
     pub last_sent_hash: u64,
@@ -82,6 +132,11 @@ pub struct KodmozCode {
     pub(crate) terminal_error: Option<String>,
     pub(crate) terminal_focus_requested: bool,
     pub(crate) logo: Option<egui::TextureHandle>,
+    pub(crate) pane_layout: PaneLayout,
+    pub(crate) panes: Vec<Option<usize>>,
+    pub(crate) focused_pane: usize,
+    pub(crate) markdown_cache: egui_commonmark::CommonMarkCache,
+    pub(crate) html_preview_cache: HashMap<u64, (u64, String)>,
     pending_command: Option<CommandId>,
     last_title: String,
 }
@@ -90,7 +145,7 @@ impl KodmozCode {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         root: Option<PathBuf>,
-        file: Option<PathBuf>,
+        files: Vec<PathBuf>,
     ) -> Self {
         configure_style(&cc.egui_ctx);
         let highlighter = Highlighter::new();
@@ -125,6 +180,11 @@ impl KodmozCode {
             terminal_error: None,
             terminal_focus_requested: true,
             logo: load_logo_texture(&cc.egui_ctx),
+            pane_layout: PaneLayout::Single,
+            panes: vec![None],
+            focused_pane: 0,
+            markdown_cache: Default::default(),
+            html_preview_cache: HashMap::new(),
             pending_command: None,
             last_title: String::new(),
         };
@@ -132,7 +192,13 @@ impl KodmozCode {
         if let Some(root) = root {
             app.open_folder(root);
         }
-        if let Some(file) = file {
+        if let Some(layout) = std::env::var("KODMOZ_LAYOUT")
+            .ok()
+            .and_then(|value| PaneLayout::from_env(&value))
+        {
+            app.set_pane_layout(layout);
+        }
+        for file in files {
             app.open_file(file);
         }
 
@@ -141,6 +207,140 @@ impl KodmozCode {
 
     fn set_status(&mut self, message: impl Into<String>) {
         self.status_msg = Some((message.into(), Instant::now()));
+    }
+
+    fn ensure_pane_vec(&mut self) {
+        let slots = self.pane_layout.slots();
+        self.panes.resize(slots, None);
+        if self.focused_pane >= slots {
+            self.focused_pane = slots.saturating_sub(1);
+        }
+    }
+
+    fn sync_active(&mut self) {
+        self.ensure_pane_vec();
+        self.active = self.panes.get(self.focused_pane).copied().flatten();
+    }
+
+    fn tab_pane(&self, tab: usize) -> Option<usize> {
+        self.panes.iter().position(|pane| *pane == Some(tab))
+    }
+
+    fn focus_pane(&mut self, pane: usize) {
+        if pane < self.panes.len() {
+            self.focused_pane = pane;
+            self.sync_active();
+        }
+    }
+
+    fn assign_tab_to_pane(&mut self, pane: usize, tab: Option<usize>) {
+        self.ensure_pane_vec();
+        let pane = pane.min(self.panes.len().saturating_sub(1));
+        if let Some(tab) = tab {
+            if let Some(existing) = self.tab_pane(tab) {
+                if existing != pane {
+                    self.focus_pane(existing);
+                    return;
+                }
+            }
+        }
+        self.panes[pane] = tab;
+        self.focused_pane = pane;
+        self.sync_active();
+    }
+
+    fn assign_new_tab(&mut self, tab: usize) {
+        self.ensure_pane_vec();
+        let pane = if self
+            .panes
+            .get(self.focused_pane)
+            .copied()
+            .flatten()
+            .is_none()
+        {
+            self.focused_pane
+        } else {
+            self.panes
+                .iter()
+                .position(|pane| pane.is_none())
+                .unwrap_or_else(|| self.focused_pane.min(self.panes.len().saturating_sub(1)))
+        };
+        self.assign_tab_to_pane(pane, Some(tab));
+    }
+
+    fn show_tab(&mut self, tab: usize) {
+        if tab >= self.tabs.len() {
+            return;
+        }
+        self.ensure_pane_vec();
+        if let Some(pane) = self.tab_pane(tab) {
+            self.focus_pane(pane);
+        } else {
+            let pane = if self
+                .panes
+                .get(self.focused_pane)
+                .copied()
+                .flatten()
+                .is_none()
+            {
+                self.focused_pane
+            } else {
+                self.panes
+                    .iter()
+                    .position(|pane| pane.is_none())
+                    .unwrap_or_else(|| self.focused_pane.min(self.panes.len().saturating_sub(1)))
+            };
+            self.assign_tab_to_pane(pane, Some(tab));
+        }
+    }
+
+    fn set_pane_layout(&mut self, layout: PaneLayout) {
+        if self.pane_layout == layout {
+            self.ensure_pane_vec();
+            return;
+        }
+        let slots = layout.slots();
+        let mut new_panes = self.panes.clone();
+        new_panes.resize(slots, None);
+        let mut used: HashSet<usize> = new_panes.iter().flatten().copied().collect();
+
+        if let Some(active) = self.active {
+            if !used.contains(&active) {
+                if let Some(pane) = new_panes.iter().position(|pane| pane.is_none()) {
+                    new_panes[pane] = Some(active);
+                    used.insert(active);
+                }
+            }
+        }
+        let mut candidates: Vec<usize> = (0..self.tabs.len())
+            .filter(|tab| !used.contains(tab))
+            .collect();
+        for pane in &mut new_panes {
+            if pane.is_none() && !candidates.is_empty() {
+                *pane = Some(candidates.remove(0));
+            }
+        }
+
+        self.panes = new_panes;
+        self.pane_layout = layout;
+        self.ensure_pane_vec();
+        if self
+            .panes
+            .get(self.focused_pane)
+            .copied()
+            .flatten()
+            .is_none()
+        {
+            if let Some((pane, _)) = self
+                .panes
+                .iter()
+                .enumerate()
+                .find(|(_, pane)| pane.is_some())
+            {
+                self.focused_pane = pane;
+            }
+        }
+        self.sync_active();
     }
 
     fn open_folder(&mut self, path: PathBuf) {
@@ -159,6 +359,10 @@ impl KodmozCode {
         self.diagnostics.clear();
         self.tabs.clear();
         self.active = None;
+        self.panes = vec![None];
+        self.focused_pane = 0;
+        self.pane_layout = PaneLayout::Single;
+        self.html_preview_cache.clear();
         self.quick_open = None;
         self.palette = None;
         self.confirm_close = None;
@@ -180,7 +384,7 @@ impl KodmozCode {
             .iter()
             .position(|tab| tab.path.as_deref() == Some(path.as_path()))
         {
-            self.active = Some(index);
+            self.show_tab(index);
             return;
         }
 
@@ -249,6 +453,7 @@ impl KodmozCode {
             dirty: false,
             saved_hash: hash,
             language: language.clone(),
+            view_mode: default_view_mode(&language),
             version: 1,
             lsp_opened: false,
             last_sent_hash: hash,
@@ -264,7 +469,7 @@ impl KodmozCode {
             image_fit: true,
         });
         let index = self.tabs.len() - 1;
-        self.active = Some(index);
+        self.assign_new_tab(index);
 
         if let Some(explorer) = &mut self.explorer {
             explorer.reveal(&path);
@@ -289,6 +494,7 @@ impl KodmozCode {
             dirty: false,
             saved_hash: hash,
             language: LanguageId::Plain,
+            view_mode: TabViewMode::Edit,
             version: 1,
             lsp_opened: false,
             last_sent_hash: hash,
@@ -303,7 +509,8 @@ impl KodmozCode {
             image_error: None,
             image_fit: true,
         });
-        self.active = Some(self.tabs.len() - 1);
+        let index = self.tabs.len() - 1;
+        self.assign_new_tab(index);
         self.set_status(format!("Yeni dosya: {name}"));
     }
 
@@ -325,17 +532,30 @@ impl KodmozCode {
         if let Some(path) = &tab.path {
             self.diagnostics.remove(path);
         }
-        if self.tabs.is_empty() {
-            self.active = None;
-        } else {
-            let new_active = match self.active {
-                Some(active) if active > index => Some(active - 1),
-                Some(active) if active == index => Some(index.min(self.tabs.len() - 1)),
-                Some(active) => Some(active),
-                None => Some(0),
-            };
-            self.active = new_active;
+        for pane in &mut self.panes {
+            match *pane {
+                Some(open) if open == index => *pane = None,
+                Some(open) if open > index => *pane = Some(open - 1),
+                _ => {}
+            }
         }
+        if self
+            .panes
+            .get(self.focused_pane)
+            .copied()
+            .flatten()
+            .is_none()
+        {
+            if let Some((pane, _)) = self
+                .panes
+                .iter()
+                .enumerate()
+                .find(|(_, pane)| pane.is_some())
+            {
+                self.focused_pane = pane;
+            }
+        }
+        self.sync_active();
     }
 
     fn save_tab(&mut self, index: usize) -> bool {
@@ -1005,6 +1225,33 @@ impl KodmozCode {
                     {
                         self.pending_command = Some(CommandId::ToggleDiagnostics);
                     }
+                    ui.add_space(4.0);
+                    ui.separator();
+                    for layout in [
+                        PaneLayout::Single,
+                        PaneLayout::TwoColumns,
+                        PaneLayout::TwoRows,
+                        PaneLayout::Three,
+                        PaneLayout::Four,
+                    ] {
+                        let icon = match layout {
+                            PaneLayout::Single => theme::Icon::LayoutSingle,
+                            PaneLayout::TwoColumns => theme::Icon::LayoutColumns,
+                            PaneLayout::TwoRows => theme::Icon::LayoutRows,
+                            PaneLayout::Three => theme::Icon::LayoutThree,
+                            PaneLayout::Four => theme::Icon::LayoutFour,
+                        };
+                        if theme::icon_toggle_button(
+                            ui,
+                            icon,
+                            self.pane_layout == layout,
+                            layout.tooltip(),
+                        )
+                        .clicked()
+                        {
+                            self.set_pane_layout(layout);
+                        }
+                    }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(root) = &self.root {
@@ -1367,9 +1614,289 @@ impl KodmozCode {
                     self.welcome(ui);
                 } else {
                     self.tabs_bar(ui);
-                    self.editor_ui(ui);
+                    self.panes_ui(ui);
                 }
             });
+    }
+
+    fn panes_ui(&mut self, ui: &mut Ui) {
+        self.ensure_pane_vec();
+        let available = ui.available_size();
+        let gap = 4.0;
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        let mut clicked_pane = None;
+
+        match self.pane_layout {
+            PaneLayout::Single => {
+                if self.pane_ui(ui, 0, available) {
+                    clicked_pane = Some(0);
+                }
+            }
+            PaneLayout::TwoColumns => {
+                let width = ((available.x - gap) * 0.5).max(80.0);
+                ui.horizontal(|ui| {
+                    if self.pane_ui(ui, 0, Vec2::new(width, available.y)) {
+                        clicked_pane = Some(0);
+                    }
+                    ui.add_space(gap);
+                    if self.pane_ui(
+                        ui,
+                        1,
+                        Vec2::new((available.x - width - gap).max(80.0), available.y),
+                    ) {
+                        clicked_pane = Some(1);
+                    }
+                });
+            }
+            PaneLayout::TwoRows => {
+                let height = ((available.y - gap) * 0.5).max(80.0);
+                ui.vertical(|ui| {
+                    if self.pane_ui(ui, 0, Vec2::new(available.x, height)) {
+                        clicked_pane = Some(0);
+                    }
+                    ui.add_space(gap);
+                    if self.pane_ui(
+                        ui,
+                        1,
+                        Vec2::new(available.x, (available.y - height - gap).max(80.0)),
+                    ) {
+                        clicked_pane = Some(1);
+                    }
+                });
+            }
+            PaneLayout::Three => {
+                let width = ((available.x - gap * 2.0) / 3.0).max(80.0);
+                ui.horizontal(|ui| {
+                    for pane in 0..3 {
+                        if self.pane_ui(ui, pane, Vec2::new(width, available.y)) {
+                            clicked_pane = Some(pane);
+                        }
+                        if pane < 2 {
+                            ui.add_space(gap);
+                        }
+                    }
+                });
+            }
+            PaneLayout::Four => {
+                let width = ((available.x - gap) * 0.5).max(80.0);
+                let height = ((available.y - gap) * 0.5).max(80.0);
+                let bottom_height = (available.y - height - gap).max(80.0);
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        if self.pane_ui(ui, 0, Vec2::new(width, height)) {
+                            clicked_pane = Some(0);
+                        }
+                        ui.add_space(gap);
+                        if self.pane_ui(
+                            ui,
+                            1,
+                            Vec2::new((available.x - width - gap).max(80.0), height),
+                        ) {
+                            clicked_pane = Some(1);
+                        }
+                    });
+                    ui.add_space(gap);
+                    ui.horizontal(|ui| {
+                        if self.pane_ui(ui, 2, Vec2::new(width, bottom_height)) {
+                            clicked_pane = Some(2);
+                        }
+                        ui.add_space(gap);
+                        if self.pane_ui(
+                            ui,
+                            3,
+                            Vec2::new((available.x - width - gap).max(80.0), bottom_height),
+                        ) {
+                            clicked_pane = Some(3);
+                        }
+                    });
+                });
+            }
+        }
+
+        if let Some(pane) = clicked_pane {
+            self.focus_pane(pane);
+        }
+    }
+
+    fn pane_ui(&mut self, ui: &mut Ui, pane_index: usize, size: Vec2) -> bool {
+        let response = ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+            let focused = pane_index == self.focused_pane;
+            let border = if focused {
+                theme::ACCENT.gamma_multiply(0.55)
+            } else {
+                theme::BORDER
+            };
+            egui::Frame::NONE
+                .fill(theme::BG)
+                .stroke(Stroke::new(1.0, border))
+                .show(ui, |ui| {
+                    ui.set_min_size(Vec2::new((size.x - 2.0).max(0.0), (size.y - 2.0).max(0.0)));
+                    self.pane_header(ui, pane_index);
+                    if let Some(tab) = self.panes.get(pane_index).copied().flatten() {
+                        self.show_tab_ui(ui, tab);
+                    } else {
+                        self.empty_pane_ui(ui);
+                    }
+                });
+        });
+
+        let pane_rect = response.response.rect;
+        let pressed = ui.ctx().input(|input| input.pointer.any_pressed());
+        let inside = ui
+            .ctx()
+            .input(|input| input.pointer.interact_pos())
+            .map(|position| pane_rect.contains(position))
+            .unwrap_or(false);
+        pressed && inside
+    }
+
+    fn pane_header(&mut self, ui: &mut Ui, pane_index: usize) {
+        let focused = pane_index == self.focused_pane;
+        let tab_index = self.panes.get(pane_index).copied().flatten();
+
+        let Some(tab_index) = tab_index else {
+            let header = egui::Frame::NONE
+                .fill(theme::SURFACE)
+                .inner_margin(Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (icon_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                        theme::paint_icon(
+                            ui.painter(),
+                            icon_rect,
+                            theme::Icon::FilePlus,
+                            theme::FAINT,
+                        );
+                        ui.label(RichText::new("Boş bölme").size(10.0).color(theme::FAINT));
+                    });
+                });
+            let rect = header.response.rect;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(rect.left(), rect.bottom()),
+                    egui::pos2(rect.right(), rect.bottom()),
+                ],
+                Stroke::new(1.0, theme::BORDER),
+            );
+            return;
+        };
+
+        if tab_index >= self.tabs.len() {
+            self.panes[pane_index] = None;
+            return;
+        }
+
+        let name = self.tabs[tab_index].name.clone();
+        let dirty = self.tabs[tab_index].dirty;
+        let language = self.tabs[tab_index].language.clone();
+        let mode = self.tabs[tab_index].view_mode;
+        let extension = self.tabs[tab_index]
+            .path
+            .as_ref()
+            .and_then(|path| path.extension())
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+            .to_string();
+        let mut new_mode = None;
+        let mut close = false;
+
+        let header = egui::Frame::NONE
+            .fill(theme::SURFACE)
+            .inner_margin(Margin::symmetric(7, 3))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.horizontal(|ui| {
+                    let (badge, _) = ui.allocate_exact_size(Vec2::new(18.0, 11.0), Sense::hover());
+                    theme::paint_file_badge(ui.painter(), badge, &extension);
+                    ui.label(
+                        RichText::new(truncate(&name, 22))
+                            .size(10.5)
+                            .color(if focused { theme::TEXT } else { theme::MUTED }),
+                    )
+                    .on_hover_text(&name);
+                    if dirty {
+                        let (dot, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
+                        ui.painter().circle_filled(dot.center(), 2.2, theme::ACCENT);
+                    }
+
+                    let preview = language.supports_preview();
+                    let needed = if preview { 106.0 } else { 24.0 };
+                    ui.add_space((ui.available_width() - needed).max(0.0));
+                    if preview {
+                        if theme::icon_toggle_button(
+                            ui,
+                            theme::Icon::Edit,
+                            mode == TabViewMode::Edit,
+                            "Düzenle",
+                        )
+                        .clicked()
+                        {
+                            new_mode = Some(TabViewMode::Edit);
+                        }
+                        if theme::icon_toggle_button(
+                            ui,
+                            theme::Icon::Split,
+                            mode == TabViewMode::Split,
+                            "Bölünmüş görünüm",
+                        )
+                        .clicked()
+                        {
+                            new_mode = Some(TabViewMode::Split);
+                        }
+                        if theme::icon_toggle_button(
+                            ui,
+                            theme::Icon::Eye,
+                            mode == TabViewMode::Preview,
+                            "Önizleme",
+                        )
+                        .clicked()
+                        {
+                            new_mode = Some(TabViewMode::Preview);
+                        }
+                    }
+                    if theme::close_button(ui).clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        let rect = header.response.rect;
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left(), rect.bottom()),
+                egui::pos2(rect.right(), rect.bottom()),
+            ],
+            Stroke::new(
+                1.0,
+                if focused {
+                    theme::ACCENT
+                } else {
+                    theme::BORDER
+                },
+            ),
+        );
+
+        if let Some(mode) = new_mode {
+            self.tabs[tab_index].view_mode = mode;
+        }
+        if close {
+            self.request_close_tab(tab_index);
+        }
+    }
+
+    fn empty_pane_ui(&mut self, ui: &mut Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space((ui.available_height() * 0.25).max(24.0));
+            let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+            theme::paint_icon(ui.painter(), icon_rect, theme::Icon::FilePlus, theme::FAINT);
+            ui.add_space(8.0);
+            ui.label(RichText::new("Boş bölme").size(11.5).color(theme::MUTED));
+            ui.add_space(6.0);
+            if theme::icon_button(ui, theme::Icon::Search, "Dosyaya Git", "Cmd+P").clicked() {
+                self.pending_command = Some(CommandId::QuickOpen);
+            }
+        });
     }
 
     fn tabs_bar(&mut self, ui: &mut Ui) {
@@ -1553,7 +2080,7 @@ impl KodmozCode {
         }
 
         if let Some(index) = activate {
-            self.active = Some(index);
+            self.show_tab(index);
         }
         if let Some(index) = close {
             self.request_close_tab(index);
@@ -1780,6 +2307,24 @@ impl eframe::App for KodmozCode {
         self.update_title(ctx);
         self.expire_status(ctx);
         ctx.request_repaint_after(Duration::from_millis(500));
+    }
+}
+
+fn default_view_mode(language: &LanguageId) -> TabViewMode {
+    if !language.supports_preview() {
+        return TabViewMode::Edit;
+    }
+    match std::env::var("KODMOZ_PREVIEW").as_deref() {
+        Ok("edit") => TabViewMode::Edit,
+        Ok("preview") => TabViewMode::Preview,
+        Ok("split") => TabViewMode::Split,
+        _ => {
+            if language.is_html() {
+                TabViewMode::Preview
+            } else {
+                TabViewMode::Split
+            }
+        }
     }
 }
 

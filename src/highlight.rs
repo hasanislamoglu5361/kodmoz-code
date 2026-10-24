@@ -144,6 +144,18 @@ impl LanguageId {
             _ => None,
         }
     }
+
+    pub fn is_markdown(&self) -> bool {
+        matches!(self, Self::Syntax { token, .. } if token == "md" || token == "markdown")
+    }
+
+    pub fn is_html(&self) -> bool {
+        matches!(self, Self::Syntax { token, .. } if token == "html" || token == "htm")
+    }
+
+    pub fn supports_preview(&self) -> bool {
+        self.is_markdown() || self.is_html()
+    }
 }
 
 fn syntax(name: &str, token: &str) -> LanguageId {

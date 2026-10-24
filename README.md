@@ -7,6 +7,8 @@ dosyalar için salt okunur önizleme sunar.
 
 ![Kodmoz Code](docs/screenshot.png)
 
+![Markdown önizleme](docs/markdown-preview.png)
+
 ## Özellikler
 
 - Native pencere, VS Code benzeri koyu tema ve amber vurgulu Kodmoz arayüzü.
@@ -22,7 +24,17 @@ dosyalar için salt okunur önizleme sunar.
   fazlası için syntect/two-face.
 - Entegre terminal: gerçek PTY üzerinde `$SHELL` (zsh/bash), ANSI renkleri,
   imleç, kaydırma geçmişi, temizleme ve yeniden başlatma. `Cmd+`` veya
-  `Cmd+J` ile açılır.
+  `Cmd+J` ile açılır; panele tıklayıp komut yazabilirsiniz.
+- Markdown görüntüleme: düzenleme, bölünmüş (solda editör / sağda canlı
+  önizleme) ve yalnızca önizleme modları. Markdown dosyaları varsayılan olarak
+  bölünmüş, HTML dosyaları önizleme modunda açılır; pane başlığındaki kalem /
+  bölme / göz ikonlarıyla geçiş yapılır. Başlıklar, listeler, kod blokları,
+  alıntılar ve bağlantılar render edilir.
+- HTML önizleme: statik HTML → Markdown dönüşümü üzerinden başlık, paragraf,
+  liste, kod ve bağlantıları gösterir. CSS/JavaScript çalıştırmaz.
+- Çoklu dosya düzeni: tek bölme, iki sütun, iki satır, üç sütun veya 2x2
+  dört bölme. Üst çubuktaki düzen ikonlarıyla seçilir; bölmeye tıklayınca
+  odaklanır, sekme veya dosya gezgininden açılan dosya o bölmeye gelir.
 - Satır içi tanılama: hatalı aralıkların altında kırmızı/sarı dalgalı çizgi,
   gutter'da hata noktası ve üzerine gelince hata mesajı.
 - LSP istemcisi (harici crate yok, stdio üzerinden JSON-RPC): Cargo projesi
@@ -110,9 +122,18 @@ kodmoz-code /yol/proje
 # Bir dosyayı aç (proje kökü Cargo.toml/.git aranarak bulunur)
 kodmoz-code /yol/proje/src/main.rs
 
-# Klasör + dosya
-kodmoz-code /yol/proje /yol/proje/src/main.rs
+# Klasör + birden fazla dosya
+kodmoz-code /yol/proje /yol/proje/src/main.rs /yol/proje/src/lib.rs
+
+# 4 bölmeli düzenle başlat
+KODMOZ_LAYOUT=4 kodmoz-code /yol/proje /yol/proje/src/main.rs /yol/proje/src/lib.rs /yol/proje/src/app.rs /yol/proje/src/ui.rs
+
+# Markdown'ı bölünmüş görünümde aç
+KODMOZ_PREVIEW=split kodmoz-code /yol/proje /yol/proje/README.md
 ```
+
+`KODMOZ_LAYOUT` değerleri: `1`, `2c` (iki sütun), `2r` (iki satır), `3`,
+`4`. `KODMOZ_PREVIEW` değerleri: `edit`, `split`, `preview`.
 
 İlk derleme eframe/egui ve grafik bağımlılıkları nedeniyle birkaç dakika
 sürebilir. `rust-analyzer` bulunamazsa IDE çalışmaya devam eder; LSP durumu üst
@@ -135,6 +156,9 @@ sürebilir. `rust-analyzer` bulunamazsa IDE çalışmaya devam eder; LSP durumu 
 | `Cmd+Shift+M` | Sorunlar panelini aç/kapat |
 | `Cmd+`` / `Cmd+J` | Terminali aç/kapat |
 | `Cmd+=` / `Cmd+-` | Yakınlaştır / uzaklaştır |
+
+Bölme düzeni ve Markdown/HTML görünüm modları üst çubuk ve pane başlığındaki
+ikonlardan seçilir.
 
 ## Mimari
 
@@ -178,6 +202,11 @@ Bunlar bilinçli v0.1 sınırlarıdır:
 - Eklenti API'si veya VS Code eklenti uyumluluğu yok.
 - Hata ayıklama (DAP), git arayüzü ve bul/değiştir yok.
 - Terminal temel düzeydedir: metin seçimi/kopyalama ve çoklu terminal yok.
+- HTML önizleme statiktir; CSS/JavaScript çalıştırmaz, tam tarayıcı değildir.
+- Markdown önizleme görselleri yüklemez; metin, başlık, liste, kod ve
+  bağlantılar gösterilir.
+- Çoklu bölmeler eşit boyuttadır; bölmeler arasında sürüklenebilir ayırıcı
+  yoktur (Markdown split görünümündeki ayırıcı sürüklenebilir).
 - Yalnızca Rust için otomatik dil sunucusu başlatılır; diğer dillerde
   renklendirme vardır, LSP yoktur.
 - SVG önizlemesi yok; SVG metin olarak açılır.

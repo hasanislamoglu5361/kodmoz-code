@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use egui::{Align2, Color32, FontId, Id, Margin, RichText, Sense, Stroke, Vec2};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -313,18 +314,18 @@ impl KodmozCode {
                 terminal.resize(rows, cols);
 
                 let body = body_rect.shrink2(Vec2::new(8.0, 6.0));
+                ui.allocate_rect(body, Sense::hover());
                 let response = ui
-                    .allocate_rect(body, Sense::click())
+                    .interact(body, Id::new("kodmoz_terminal_body"), Sense::click())
                     .on_hover_cursor(egui::CursorIcon::Text);
-                let terminal_id = Id::new("kodmoz_terminal_body");
                 if response.clicked() {
-                    ui.memory_mut(|memory| memory.request_focus(terminal_id));
+                    response.request_focus();
                 }
                 if self.terminal_focus_requested {
-                    ui.memory_mut(|memory| memory.request_focus(terminal_id));
+                    response.request_focus();
                     self.terminal_focus_requested = false;
                 }
-                let focused = ui.memory(|memory| memory.has_focus(terminal_id));
+                let focused = response.has_focus();
 
                 if focused {
                     let events = ui.input(|input| input.events.clone());
@@ -473,6 +474,13 @@ impl KodmozCode {
                         Stroke::new(1.0, theme::BORDER),
                         egui::StrokeKind::Inside,
                     );
+                    painter.text(
+                        body.right_bottom() + Vec2::new(-10.0, -8.0),
+                        Align2::RIGHT_BOTTOM,
+                        "yazmak için tıkla",
+                        FontId::proportional(9.5),
+                        theme::FAINT,
+                    );
                 }
             });
 
@@ -483,6 +491,9 @@ impl KodmozCode {
             self.terminal = None;
             self.terminal_error = None;
             self.terminal_focus_requested = true;
+        }
+        if self.terminal_visible {
+            ctx.request_repaint_after(Duration::from_millis(30));
         }
     }
 }

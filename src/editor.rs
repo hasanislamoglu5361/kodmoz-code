@@ -14,12 +14,40 @@ use crate::highlight::LanguageId;
 use crate::theme;
 
 impl KodmozCode {
-    pub(crate) fn editor_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(index) = self.active else {
-            return;
-        };
+    pub(crate) fn show_tab_ui(&mut self, ui: &mut egui::Ui, index: usize) {
         if index >= self.tabs.len() {
             return;
+        }
+
+        if self.tabs[index].language.supports_preview() {
+            match self.tabs[index].view_mode {
+                crate::app::TabViewMode::Preview => {
+                    self.preview_ui(ui, index);
+                    return;
+                }
+                crate::app::TabViewMode::Split => {
+                    let available = ui.available_width();
+                    if available < 360.0 {
+                        self.preview_ui(ui, index);
+                        return;
+                    }
+                    let tab_id = self.tabs[index].id;
+                    egui::SidePanel::right(egui::Id::new(("kodmoz_preview_split", tab_id)))
+                        .resizable(true)
+                        .default_width((available * 0.5).max(160.0))
+                        .min_width(140.0)
+                        .max_width((available - 140.0).max(140.0))
+                        .frame(
+                            egui::Frame::NONE
+                                .fill(theme::SURFACE)
+                                .inner_margin(Margin::symmetric(10, 8)),
+                        )
+                        .show_inside(ui, |ui| self.preview_contents(ui, index, true));
+                    self.text_editor_ui(ui, index);
+                    return;
+                }
+                crate::app::TabViewMode::Edit => {}
+            }
         }
 
         match &self.tabs[index].language {
@@ -32,6 +60,13 @@ impl KodmozCode {
                 return;
             }
             _ => {}
+        }
+        self.text_editor_ui(ui, index);
+    }
+
+    fn text_editor_ui(&mut self, ui: &mut egui::Ui, index: usize) {
+        if index >= self.tabs.len() {
+            return;
         }
 
         let tab_id = self.tabs[index].id;
@@ -292,6 +327,87 @@ impl KodmozCode {
                 }
             }
         }
+    }
+
+    fn preview_ui(&mut self, ui: &mut egui::Ui, index: usize) {
+        egui::Frame::NONE.fill(theme::BG).show(ui, |ui| {
+            self.preview_contents(ui, index, false);
+        });
+    }
+
+    fn preview_contents(&mut self, ui: &mut egui::Ui, index: usize, split: bool) {
+        let tab_id = self.tabs[index].id;
+        let is_html = self.tabs[index].language.is_html();
+        let is_markdown = self.tabs[index].language.is_markdown();
+        if !is_html && !is_markdown {
+            return;
+        }
+        let content = self.tabs[index].content.clone();
+
+        let markdown = if is_html {
+            let hash = hash_str(&content);
+            let cached = self
+                .html_preview_cache
+                .get(&tab_id)
+                .filter(|(cached_hash, _)| *cached_hash == hash)
+                .map(|(_, markdown)| markdown.clone());
+            if let Some(markdown) = cached {
+                markdown
+            } else {
+                let markdown = htmd::convert(&content).unwrap_or_else(|_| content.clone());
+                self.html_preview_cache
+                    .insert(tab_id, (hash, markdown.clone()));
+                markdown
+            }
+        } else {
+            content
+        };
+
+        egui::Frame::NONE
+            .fill(theme::PANEL_BG)
+            .inner_margin(Margin::symmetric(10, 5))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    theme::paint_icon(ui.painter(), icon_rect, theme::Icon::Eye, theme::ACCENT);
+                    ui.label(
+                        RichText::new(if is_html {
+                            "HTML ÖNİZLEME"
+                        } else {
+                            "MARKDOWN ÖNİZLEME"
+                        })
+                        .size(9.5)
+                        .strong()
+                        .color(theme::FAINT),
+                    );
+                    if is_html {
+                        theme::chip(ui, "statik", theme::MUTED, theme::SURFACE);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::icon_only_button(ui, theme::Icon::Edit, "Düzenleme moduna geç")
+                            .clicked()
+                        {
+                            self.tabs[index].view_mode = crate::app::TabViewMode::Edit;
+                        }
+                    });
+                });
+            });
+
+        let cache = &mut self.markdown_cache;
+        egui::ScrollArea::vertical()
+            .id_salt(("kodmoz_preview_scroll", tab_id, split))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.vertical(|ui| {
+                        ui.set_width((ui.available_width() - 12.0).max(80.0));
+                        egui_commonmark::CommonMarkViewer::new().show(ui, cache, &markdown);
+                    });
+                });
+                ui.add_space(20.0);
+            });
     }
 
     fn image_ui(&mut self, ui: &mut egui::Ui, index: usize) {
