@@ -18,6 +18,7 @@ pub enum CommandId {
     ToggleDiagnostics,
     ZoomIn,
     ZoomOut,
+    ResetZoom,
     Quit,
 }
 
@@ -38,6 +39,7 @@ pub const COMMANDS: &[(&str, &str, CommandId)] = &[
     ),
     ("Yakınlaştır", "Cmd+=", CommandId::ZoomIn),
     ("Uzaklaştır", "Cmd+-", CommandId::ZoomOut),
+    ("Yakınlaştırmayı Sıfırla", "Cmd+0", CommandId::ResetZoom),
     ("Çıkış", "Cmd+Q", CommandId::Quit),
 ];
 

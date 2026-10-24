@@ -10,7 +10,6 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use crate::app::KodmozCode;
 use crate::theme;
 
-const TERMINAL_FONT_SIZE: f32 = 12.0;
 const SCROLLBACK_LINES: usize = 5000;
 
 pub struct TerminalSession {
@@ -267,7 +266,8 @@ impl KodmozCode {
                 );
 
                 let body_rect = ui.available_rect_before_wrap();
-                let font = FontId::monospace(TERMINAL_FONT_SIZE);
+                let terminal_font_size = (self.font_size * 0.86).clamp(9.0, 24.0);
+                let font = FontId::monospace(terminal_font_size);
                 let cell_width = ui.fonts(|fonts| {
                     fonts
                         .layout_no_wrap("M".to_owned(), font.clone(), Color32::WHITE)

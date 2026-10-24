@@ -55,6 +55,9 @@ dosyalar için salt okunur önizleme sunar.
 - CRLF satır sonlarını koruyarak kaydetme.
 - Sürükle-bırak ile dosya/klasör açma.
 - `Cmd+=` / `Cmd+-` ile yazı tipi yakınlaştırma.
+- MacBook trackpad'de iki parmak pinch ile yazı boyutunu büyütme/küçültme;
+  `Cmd+0` veya durum çubuğundaki `px` göstergesine tıklayarak 100%'e sıfırlama.
+  Terminal yazı boyutu da bu ölçeğe uyum sağlar.
 - `KODMOZ_PROBLEMS=1` ile sorunlar paneli, `KODMOZ_TERMINAL=1` ile terminal
   paneli açık başlar.
 
@@ -156,6 +159,7 @@ sürebilir. `rust-analyzer` bulunamazsa IDE çalışmaya devam eder; LSP durumu 
 | `Cmd+Shift+M` | Sorunlar panelini aç/kapat |
 | `Cmd+`` / `Cmd+J` | Terminali aç/kapat |
 | `Cmd+=` / `Cmd+-` | Yakınlaştır / uzaklaştır |
+| `Cmd+0` | Yazı boyutunu sıfırla |
 
 Bölme düzeni ve Markdown/HTML görünüm modları üst çubuk ve pane başlığındaki
 ikonlardan seçilir.

@@ -18,6 +18,10 @@ use crate::lsp::{
 use crate::terminal::TerminalSession;
 use crate::theme;
 
+const DEFAULT_FONT_SIZE: f32 = 14.0;
+const MIN_FONT_SIZE: f32 = 9.0;
+const MAX_FONT_SIZE: f32 = 28.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum TabViewMode {
     #[default]
@@ -160,7 +164,7 @@ impl KodmozCode {
             active: None,
             next_tab_id: 1,
             highlighter,
-            font_size: 14.0,
+            font_size: DEFAULT_FONT_SIZE,
             sidebar_visible: true,
             diagnostics_visible: std::env::var_os("KODMOZ_PROBLEMS").is_some(),
             lsp: None,
@@ -1009,6 +1013,7 @@ impl KodmozCode {
             ToggleDiagnostics,
             ZoomIn,
             ZoomOut,
+            ResetZoom,
         }
 
         let mut action = None;
@@ -1058,6 +1063,9 @@ impl KodmozCode {
             if input.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Minus)) {
                 action = Some(Action::ZoomOut);
             }
+            if input.consume_shortcut(&KeyboardShortcut::new(cmd, Key::Num0)) {
+                action = Some(Action::ResetZoom);
+            }
         });
 
         match action {
@@ -1089,24 +1097,48 @@ impl KodmozCode {
             }
             Some(Action::ToggleDiagnostics) => self.diagnostics_visible = !self.diagnostics_visible,
             Some(Action::ZoomIn) => {
-                let size = (self.font_size + 1.0).min(28.0);
+                let size = (self.font_size + 1.0).min(MAX_FONT_SIZE);
                 self.set_font_size(ctx, size);
             }
             Some(Action::ZoomOut) => {
-                let size = (self.font_size - 1.0).max(9.0);
+                let size = (self.font_size - 1.0).max(MIN_FONT_SIZE);
                 self.set_font_size(ctx, size);
             }
+            Some(Action::ResetZoom) => self.set_font_size(ctx, DEFAULT_FONT_SIZE),
             None => {}
         }
     }
 
     fn set_font_size(&mut self, ctx: &egui::Context, size: f32) {
+        let size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        if (size - self.font_size).abs() < 0.05 {
+            return;
+        }
         self.font_size = size;
         ctx.style_mut(|style| {
             style
                 .text_styles
                 .insert(TextStyle::Monospace, FontId::monospace(size));
+            style
+                .text_styles
+                .insert(TextStyle::Body, FontId::proportional(size * 0.93));
+            style
+                .text_styles
+                .insert(TextStyle::Button, FontId::proportional(size * 0.86));
+            style
+                .text_styles
+                .insert(TextStyle::Small, FontId::proportional(size * 0.71));
         });
+        ctx.request_repaint();
+    }
+
+    fn handle_pinch_zoom(&mut self, ctx: &egui::Context) {
+        let delta = ctx.input(|input| input.zoom_delta());
+        if (delta - 1.0).abs() < 0.001 {
+            return;
+        }
+        let size = zoomed_font_size(self.font_size, delta);
+        self.set_font_size(ctx, size);
     }
 
     fn open_quick_open(&mut self) {
@@ -1151,13 +1183,14 @@ impl KodmozCode {
             CommandId::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
             CommandId::ToggleDiagnostics => self.diagnostics_visible = !self.diagnostics_visible,
             CommandId::ZoomIn => {
-                let size = (self.font_size + 1.0).min(28.0);
+                let size = (self.font_size + 1.0).min(MAX_FONT_SIZE);
                 self.set_font_size(ctx, size);
             }
             CommandId::ZoomOut => {
-                let size = (self.font_size - 1.0).max(9.0);
+                let size = (self.font_size - 1.0).max(MIN_FONT_SIZE);
                 self.set_font_size(ctx, size);
             }
+            CommandId::ResetZoom => self.set_font_size(ctx, DEFAULT_FONT_SIZE),
             CommandId::Quit => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -2277,6 +2310,7 @@ impl KodmozCode {
 
 impl eframe::App for KodmozCode {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_pinch_zoom(ctx);
         self.handle_shortcuts(ctx);
         for path in crate::macos_open::take() {
             self.open_system_path(path);
@@ -2440,6 +2474,10 @@ fn status_separator(ui: &mut Ui) {
     ui.label(RichText::new("·").size(9.0).color(theme::FAINT));
 }
 
+fn zoomed_font_size(current: f32, delta: f32) -> f32 {
+    (current * delta).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+}
+
 fn project_root_for(file: &Path) -> PathBuf {
     let start = file.parent().unwrap_or(file);
     for ancestor in start.ancestors() {
@@ -2564,6 +2602,28 @@ mod tests {
         assert_eq!(line_of_char("ab\ncd", 0), 0);
         assert_eq!(line_of_char("ab\ncd", 3), 1);
         assert_eq!(line_of_char("ab\ncd\nef", 9), 2);
+    }
+
+    #[test]
+    fn pinch_zoom_is_clamped() {
+        assert!((zoomed_font_size(14.0, 1.2) - 16.8).abs() < 0.001);
+        assert_eq!(zoomed_font_size(14.0, 5.0), MAX_FONT_SIZE);
+        assert_eq!(zoomed_font_size(14.0, 0.1), MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn egui_reports_zoom_events() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Zoom(1.25)],
+                ..Default::default()
+            },
+            |ctx| {
+                let delta = ctx.input(|input| input.zoom_delta());
+                assert!((delta - 1.25).abs() < 0.001, "zoom delta = {delta}");
+            },
+        );
     }
 
     #[test]
