@@ -9,6 +9,8 @@ dosyalar için salt okunur önizleme sunar.
 
 ![Markdown önizleme](docs/markdown-preview.png)
 
+![Option tuşu basılıyken 2× mercek](docs/zoom-lens.png)
+
 ## Özellikler
 
 - Native pencere, VS Code benzeri koyu tema ve amber vurgulu Kodmoz arayüzü.
