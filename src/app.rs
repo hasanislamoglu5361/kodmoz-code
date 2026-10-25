@@ -141,6 +141,9 @@ pub struct KodmozCode {
     pub(crate) focused_pane: usize,
     pub(crate) markdown_cache: egui_commonmark::CommonMarkCache,
     pub(crate) html_preview_cache: HashMap<u64, (u64, String)>,
+    pub(crate) lens_texture: Option<egui::TextureHandle>,
+    pub(crate) lens_capture_pending: bool,
+    pub(crate) lens_alt_was_down: bool,
     pending_command: Option<CommandId>,
     last_title: String,
 }
@@ -189,6 +192,9 @@ impl KodmozCode {
             focused_pane: 0,
             markdown_cache: Default::default(),
             html_preview_cache: HashMap::new(),
+            lens_texture: None,
+            lens_capture_pending: false,
+            lens_alt_was_down: false,
             pending_command: None,
             last_title: String::new(),
         };
@@ -1130,6 +1136,148 @@ impl KodmozCode {
                 .insert(TextStyle::Small, FontId::proportional(size * 0.71));
         });
         ctx.request_repaint();
+    }
+
+    fn update_lens(&mut self, ctx: &egui::Context) {
+        let alt_down = ctx.input(|input| input.modifiers.alt);
+        if alt_down && !self.lens_alt_was_down {
+            self.lens_texture = None;
+            if !self.lens_capture_pending {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                self.lens_capture_pending = true;
+            }
+        }
+        if !alt_down && self.lens_alt_was_down {
+            self.lens_capture_pending = false;
+        }
+        self.lens_alt_was_down = alt_down;
+
+        let screenshot = ctx.input(|input| {
+            input.events.iter().rev().find_map(|event| {
+                if let egui::Event::Screenshot { image, .. } = event {
+                    Some(image.clone())
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(image) = screenshot {
+            self.lens_texture = Some(ctx.load_texture(
+                "kodmoz_lens",
+                (*image).clone(),
+                egui::TextureOptions::LINEAR,
+            ));
+            self.lens_capture_pending = false;
+        }
+
+        if alt_down || self.lens_capture_pending {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    fn draw_lens(&self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.modifiers.alt) {
+            return;
+        }
+        let Some(texture) = &self.lens_texture else {
+            return;
+        };
+        let screen = ctx.screen_rect();
+        let Some(pointer) = ctx.input(|input| input.pointer.hover_pos()) else {
+            return;
+        };
+        if !screen.contains(pointer) {
+            return;
+        }
+        let image_size = texture.size_vec2();
+        if image_size.x < 8.0 || image_size.y < 8.0 {
+            return;
+        }
+        let scale = Vec2::new(
+            image_size.x / screen.width().max(1.0),
+            image_size.y / screen.height().max(1.0),
+        );
+        let pointer_px = Vec2::new(
+            (pointer.x - screen.left()) * scale.x,
+            (pointer.y - screen.top()) * scale.y,
+        );
+        let uv_center = pointer_px / image_size;
+        let zoom = 2.0;
+        let radius = 120.0;
+        let uv_radius = Vec2::new(
+            radius / zoom * scale.x / image_size.x,
+            radius / zoom * scale.y / image_size.y,
+        );
+
+        let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("kodmoz_lens"));
+        let painter = ctx.layer_painter(layer);
+
+        painter.circle_filled(
+            pointer + Vec2::new(0.0, 3.0),
+            radius + 4.0,
+            Color32::from_black_alpha(70),
+        );
+
+        let segments = 64u32;
+        let mut mesh = egui::Mesh::with_texture(texture.id());
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: pointer,
+            uv: egui::pos2(uv_center.x, uv_center.y),
+            color: Color32::WHITE,
+        });
+        for index in 0..segments {
+            let angle = (index as f32 / segments as f32) * std::f32::consts::TAU;
+            let direction = Vec2::new(angle.cos(), angle.sin());
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: pointer + direction * radius,
+                uv: egui::pos2(
+                    uv_center.x + direction.x * uv_radius.x,
+                    uv_center.y + direction.y * uv_radius.y,
+                ),
+                color: Color32::WHITE,
+            });
+        }
+        for index in 0..segments {
+            mesh.add_triangle(0, 1 + index, 1 + (index + 1) % segments);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+
+        painter.circle_stroke(pointer, radius + 1.0, Stroke::new(2.0, theme::ACCENT));
+        painter.circle_stroke(
+            pointer,
+            radius - 1.5,
+            Stroke::new(1.0, Color32::from_black_alpha(100)),
+        );
+
+        let crosshair = Color32::from_white_alpha(160);
+        painter.line_segment(
+            [
+                pointer + Vec2::new(-7.0, 0.0),
+                pointer + Vec2::new(7.0, 0.0),
+            ],
+            Stroke::new(1.0, crosshair),
+        );
+        painter.line_segment(
+            [
+                pointer + Vec2::new(0.0, -7.0),
+                pointer + Vec2::new(0.0, 7.0),
+            ],
+            Stroke::new(1.0, crosshair),
+        );
+
+        let label_center = pointer + Vec2::new(0.0, radius - 18.0);
+        painter.rect_filled(
+            egui::Rect::from_center_size(label_center, Vec2::new(30.0, 17.0)),
+            egui::CornerRadius::same(8),
+            Color32::from_black_alpha(180),
+        );
+        painter.text(
+            label_center,
+            Align2::CENTER_CENTER,
+            "2×",
+            FontId::proportional(10.0),
+            Color32::WHITE,
+        );
     }
 
     fn handle_pinch_zoom(&mut self, ctx: &egui::Context) {
@@ -2175,7 +2323,7 @@ impl KodmozCode {
             });
             ui.add_space(20.0);
             ui.label(
-                RichText::new("Rust dosyası açtığında rust-analyzer otomatik başlar")
+                RichText::new("Option (Alt) basılı tut: 2× mercek  ·  Cmd+0: yazı boyutu sıfırla")
                     .size(10.0)
                     .color(theme::FAINT),
             );
@@ -2310,6 +2458,7 @@ impl KodmozCode {
 
 impl eframe::App for KodmozCode {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.update_lens(ctx);
         self.handle_pinch_zoom(ctx);
         self.handle_shortcuts(ctx);
         for path in crate::macos_open::take() {
@@ -2340,6 +2489,7 @@ impl eframe::App for KodmozCode {
 
         self.update_title(ctx);
         self.expire_status(ctx);
+        self.draw_lens(ctx);
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 }

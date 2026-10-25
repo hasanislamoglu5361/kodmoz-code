@@ -58,6 +58,10 @@ dosyalar için salt okunur önizleme sunar.
 - MacBook trackpad'de iki parmak pinch ile yazı boyutunu büyütme/küçültme;
   `Cmd+0` veya durum çubuğundaki `px` göstergesine tıklayarak 100%'e sıfırlama.
   Terminal yazı boyutu da bu ölçeğe uyum sağlar.
+- **Mercek:** `Option` (Alt) tuşunu basılı tutunca fareyi takip eden 2× büyütmeli
+  dairesel bir mercek açılır; tuşu bırakınca kaybolur. Mercek uygulama
+  penceresinin anlık görüntüsünü büyütür ve kod, terminal, önizleme dahil
+  ekrandaki içeriği okumayı kolaylaştırır.
 - `KODMOZ_PROBLEMS=1` ile sorunlar paneli, `KODMOZ_TERMINAL=1` ile terminal
   paneli açık başlar.
 
@@ -160,6 +164,7 @@ sürebilir. `rust-analyzer` bulunamazsa IDE çalışmaya devam eder; LSP durumu 
 | `Cmd+`` / `Cmd+J` | Terminali aç/kapat |
 | `Cmd+=` / `Cmd+-` | Yakınlaştır / uzaklaştır |
 | `Cmd+0` | Yazı boyutunu sıfırla |
+| `Option` (basılı tut) | 2× fare merceği |
 
 Bölme düzeni ve Markdown/HTML görünüm modları üst çubuk ve pane başlığındaki
 ikonlardan seçilir.
